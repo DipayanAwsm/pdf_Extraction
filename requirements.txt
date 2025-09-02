@@ -5,5 +5,7 @@ Pillow==10.4.0
 click==8.1.7
 python-dateutil==2.9.0.post0
 reportlab==4.2.2
+camelot-py[cv]==0.11.0
+tabula-py==2.9.0
 
 

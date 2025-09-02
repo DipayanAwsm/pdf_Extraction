@@ -203,6 +203,7 @@ def generate_bulk_claims_pdfs(out_dir: str, num_pdfs: int = 1, num_claims: int =
 
     for i in range(1, num_pdfs + 1):
         file_path = Path(out_dir) / f"bulk_claims_{i}.pdf"
+        truth_path = Path(out_dir) / f"bulk_claims_{i}.groundtruth.jsonl"
         c = canvas.Canvas(str(file_path), pagesize=LETTER)
         width, height = LETTER
 
@@ -223,6 +224,7 @@ def generate_bulk_claims_pdfs(out_dir: str, num_pdfs: int = 1, num_claims: int =
         new_page(page_num)
         y = top_margin - 36
 
+        truth_records = []
         for n in range(num_claims):
             # Choose a claim number: duplicate from base or new unique
             if base_numbers and rng.random() < duplicate_ratio:
@@ -237,6 +239,13 @@ def generate_bulk_claims_pdfs(out_dir: str, num_pdfs: int = 1, num_claims: int =
             # Unstructured narrative text (vary wording/order)
             template = rng.choice(templates)
             paragraph = template.format(claim_no=claim_no, amount=amount, reason=reason, loss_date=loss_date)
+
+            truth_records.append({
+                "claim_number": claim_no,
+                "amount": f"${amount:,.2f}",
+                "reason": reason,
+                "date": loss_date,
+            })
 
             # Wrap and draw, then add a blank line between claims as delimiter
             max_width = int(width - left_margin - right_margin)
@@ -261,7 +270,12 @@ def generate_bulk_claims_pdfs(out_dir: str, num_pdfs: int = 1, num_claims: int =
 
         c.showPage()
         c.save()
-        print(f"Created {file_path}")
+        # Write ground truth JSONL
+        import json
+        with open(truth_path, "w", encoding="utf-8") as f:
+            for rec in truth_records:
+                f.write(json.dumps(rec) + "\n")
+        print(f"Created {file_path} and {truth_path}")
 
 
 if __name__ == "__main__":

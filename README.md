@@ -10,6 +10,7 @@ Extract claim number, claimant name, and date from unstructured PDFs using offli
   - Date in many formats (MM/DD/YYYY, DD-MM-YYYY, Month DD, YYYY, etc.)
 - CLI to process a single file or a directory; outputs JSON or CSV
 - Sample PDF generator for unstructured layouts
+ - Optional model comparisons: Regex vs Camelot vs Tabula against ground truth
 
 ### Requirements
 Python 3.9+
@@ -17,6 +18,10 @@ Python 3.9+
 System packages (macOS):
 - `brew install tesseract`
 - `brew install poppler` (needed by pdf2image)
+- Camelot/tabula extras:
+  - `pip install camelot-py[cv] tabula-py`
+  - For Camelot (lattice), install OpenCV and Ghostscript if needed (`brew install ghostscript opencv`)
+  - For Tabula, ensure Java is installed (`brew install --cask temurin`)
 
 Linux equivalents: install `tesseract-ocr` and `poppler-utils` via your package manager.
 
@@ -58,6 +63,23 @@ python scripts/generate_samples.py \
 Notes:
 - Duplicate claim numbers can appear across generated PDFs according to `--dup-ratio`.
 - Bulk mode writes narrative lines like: "Claim# ABC-12345 noted with amount $1,234.56. Reason: Fire damage. Date of loss: 03/21/2024." Claims are delimited by a blank line.
+
+### Compare extraction methods (Regex vs Camelot vs Tabula)
+1) Generate a bulk PDF and its ground truth JSONL:
+```bash
+python scripts/generate_samples.py --out samples --bulk --bulk-claims 50 --dup-ratio 0.2 --seed 7
+```
+This creates `samples/bulk_claims_1.pdf` and `samples/bulk_claims_1.groundtruth.jsonl`.
+
+2) Run the comparator:
+```bash
+python -m claim_extractor.compare_models samples/bulk_claims_1.pdf --truth samples/bulk_claims_1.groundtruth.jsonl
+```
+Output shows per-field exact-match accuracy by position: model,claim_no,amount,reason,date.
+
+Notes:
+- Regex approach is for unstructured narrative PDFs. Camelot/Tabula target table PDFs.
+- Tabula requires Java; Camelot may need Ghostscript/OpenCV depending on flavor.
 
 ### Run the extractor
 - Single file to JSON (stdout):
