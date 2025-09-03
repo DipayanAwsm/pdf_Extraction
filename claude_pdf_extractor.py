@@ -31,85 +31,171 @@ def setup_aws_client(access_key: str, secret_key: str, session_token: str, regio
         return None
 
 
-def extract_tables_with_claude(bedrock_client, pdf_text: str, pdf_name: str) -> List[Dict[str, Any]]:
-    """Extract tables from PDF text using AWS Bedrock Claude."""
+def extract_text_from_pdf_page_by_page(pdf_path: str, use_ocr_fallback: bool = True, dpi: int = 300):
+    """Extract text from PDF page by page to handle large documents better."""
+    import pdfplumber
+    from pdf2image import convert_from_path
+    import pytesseract
     
-    prompt = f"""
-    You are an expert at extracting structured data from PDF documents. 
-    
-    Please analyze the following PDF content and extract ALL tables and structured data you can find.
-    For each table or structured section, provide:
-    1. A descriptive name for the table/section
-    2. The extracted data in a structured format (JSON)
-    3. Any relevant metadata (headers, row counts, etc.)
-    
-    PDF Name: {pdf_name}
-    
-    Content:
-    {pdf_text[:8000]}  # Limit content length for API
-    
-    Please respond with a JSON array where each element represents a table/section:
-    [
-        {{
-            "table_name": "Description of the table",
-            "headers": ["Column1", "Column2", "Column3"],
-            "data": [
-                ["Row1Col1", "Row1Col2", "Row1Col3"],
-                ["Row2Col1", "Row2Col2", "Row2Col3"]
-            ],
-            "metadata": {{
-                "row_count": 2,
-                "column_count": 3,
-                "description": "Brief description of what this table contains"
-            }}
-        }}
-    ]
-    
-    If no structured tables are found, extract any organized information in a table-like format.
-    """
+    all_text = []
+    used_ocr = False
     
     try:
-        print(f"🤖 Sending request to Claude for {pdf_name}...")
-        
-        response = bedrock_client.invoke_model(
-            modelId="anthropic.claude-3-sonnet-20240229-v1:0",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4000,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            })
-        )
-        
-        response_body = json.loads(response['body'].read())
-        content = response_body['content'][0]['text']
-        
-        print(f"✅ Claude response received for {pdf_name}")
-        
-        # Try to extract JSON from Claude's response
-        try:
-            # Look for JSON content in the response
-            start_idx = content.find('[')
-            end_idx = content.rfind(']') + 1
-            if start_idx != -1 and end_idx != -1:
-                json_content = content[start_idx:end_idx]
-                tables = json.loads(json_content)
-                print(f"📊 Extracted {len(tables)} tables from {pdf_name}")
-                return tables
-            else:
-                print(f"⚠️ Could not parse structured response from Claude for {pdf_name}")
-                return []
-        except json.JSONDecodeError as e:
-            print(f"⚠️ Could not parse JSON response from Claude for {pdf_name}: {e}")
-            return []
+        # Try native text extraction first
+        with pdfplumber.open(pdf_path) as pdf:
+            total_pages = len(pdf.pages)
+            print(f"📄 Total pages in PDF: {total_pages}")
             
+            for page_num, page in enumerate(pdf.pages, 1):
+                print(f"📖 Processing page {page_num}/{total_pages}...")
+                
+                # Extract text from current page
+                page_text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+                
+                if not page_text.strip() and use_ocr_fallback:
+                    # If no text, try OCR for this page
+                    print(f"📷 Using OCR for page {page_num}...")
+                    images = convert_from_path(pdf_path, dpi=dpi, first_page=page_num, last_page=page_num)
+                    if images:
+                        page_text = pytesseract.image_to_string(images[0], lang="eng")
+                        used_ocr = True
+                
+                if page_text.strip():
+                    all_text.append(f"--- PAGE {page_num} ---\n{page_text.strip()}")
+                    print(f"✅ Page {page_num}: {len(page_text)} characters")
+                else:
+                    print(f"⚠️ Page {page_num}: No text extracted")
+                    all_text.append(f"--- PAGE {page_num} ---\n[No text content]")
+                
+                # Add a small delay to prevent overwhelming the system
+                import time
+                time.sleep(0.1)
+        
+        return "\n\n".join(all_text), used_ocr
+        
     except Exception as e:
-        print(f"❌ Error calling AWS Bedrock: {str(e)}")
-        return []
+        print(f"❌ Error in page-by-page extraction: {str(e)}")
+        # Fallback to original method
+        return extract_text_from_pdf(pdf_path, use_ocr_fallback, dpi)
+
+
+def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_name: str) -> List[Dict[str, Any]]:
+    """Extract tables from PDF text using AWS Bedrock Claude with better handling of large content."""
+    
+    # Split text into manageable chunks if it's very long
+    max_chunk_size = 15000  # Claude can handle this size well
+    text_chunks = []
+    
+    if len(pdf_text) > max_chunk_size:
+        print(f"📏 Text is very long ({len(pdf_text)} chars), splitting into chunks...")
+        # Split by page boundaries
+        pages = pdf_text.split("--- PAGE")
+        current_chunk = ""
+        
+        for page in pages:
+            if not page.strip():
+                continue
+            if len(current_chunk) + len(page) > max_chunk_size and current_chunk:
+                text_chunks.append(current_chunk.strip())
+                current_chunk = page
+            else:
+                current_chunk += "\n--- PAGE" + page
+        
+        if current_chunk.strip():
+            text_chunks.append(current_chunk.strip())
+        
+        print(f"📦 Split into {len(text_chunks)} chunks")
+    else:
+        text_chunks = [pdf_text]
+    
+    all_tables = []
+    
+    for chunk_idx, chunk in enumerate(text_chunks, 1):
+        print(f"🤖 Processing chunk {chunk_idx}/{len(text_chunks)} ({len(chunk)} chars)...")
+        
+        prompt = f"""
+        You are an expert at extracting structured data from PDF documents. 
+        
+        Please analyze the following PDF content chunk and extract ALL tables and structured data you can find.
+        This is chunk {chunk_idx} of {len(text_chunks)} from the document.
+        
+        For each table or structured section, provide:
+        1. A descriptive name for the table/section
+        2. The extracted data in a structured format (JSON)
+        3. Any relevant metadata (headers, row counts, etc.)
+        
+        PDF Name: {pdf_name}
+        Chunk: {chunk_idx}/{len(text_chunks)}
+        
+        Content:
+        {chunk}
+        
+        Please respond with a JSON array where each element represents a table/section:
+        [
+            {{
+                "table_name": "Description of the table",
+                "headers": ["Column1", "Column2", "Column3"],
+                "data": [
+                    ["Row1Col1", "Row1Col2", "Row1Col3"],
+                    ["Row2Col1", "Row2Col2", "Row2Col3"]
+                ],
+                "metadata": {{
+                    "row_count": 2,
+                    "column_count": 3,
+                    "description": "Brief description of what this table contains",
+                    "chunk_source": {chunk_idx}
+                }}
+            }}
+        ]
+        
+        If no structured tables are found, extract any organized information in a table-like format.
+        Focus on finding tables, lists, and structured data in this chunk.
+        """
+        
+        try:
+            response = bedrock_client.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4000,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                })
+            )
+            
+            response_body = json.loads(response['body'].read())
+            content = response_body['content'][0]['text']
+            
+            print(f"✅ Claude response received for chunk {chunk_idx}")
+            
+            # Try to extract JSON from Claude's response
+            try:
+                start_idx = content.find('[')
+                end_idx = content.rfind(']') + 1
+                if start_idx != -1 and end_idx != -1:
+                    json_content = content[start_idx:end_idx]
+                    chunk_tables = json.loads(json_content)
+                    print(f"📊 Extracted {len(chunk_tables)} tables from chunk {chunk_idx}")
+                    all_tables.extend(chunk_tables)
+                else:
+                    print(f"⚠️ Could not parse structured response from Claude for chunk {chunk_idx}")
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Could not parse JSON response from Claude for chunk {chunk_idx}: {e}")
+                
+        except Exception as e:
+            print(f"❌ Error calling AWS Bedrock for chunk {chunk_idx}: {str(e)}")
+            continue
+        
+        # Add delay between chunks to prevent rate limiting
+        import time
+        time.sleep(1)
+    
+    print(f"🎯 Total tables extracted across all chunks: {len(all_tables)}")
+    return all_tables
 
 
 def save_to_excel(tables_data: List[Dict[str, Any]], output_path: str, pdf_name: str = None):
@@ -173,24 +259,32 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
     print("=" * 50)
     
     try:
-        # Extract text from PDF
-        pdf_text, used_ocr = extract_text_from_pdf(str(pdf_path), use_ocr_fallback=True)
+        # Extract complete text from PDF page by page (no truncation)
+        print("📖 Extracting complete text from PDF page by page...")
+        pdf_text, used_ocr = extract_text_from_pdf_page_by_page(str(pdf_path), use_ocr_fallback=True)
         
         if used_ocr:
-            print(f"📷 OCR used (scanned document)")
+            print(f"📷 OCR used for some pages (scanned content)")
         else:
-            print(f"📝 Text extraction used")
+            print(f"📝 Text extraction used for all pages")
         
-        print(f"📏 Text length: {len(pdf_text)} characters")
+        print(f"📏 Complete text length: {len(pdf_text)} characters")
+        print(f"📄 Text preview (first 200 chars): {pdf_text[:200]}...")
         
-        # Extract tables using Claude
-        tables = extract_tables_with_claude(bedrock_client, pdf_text, pdf_path.name)
+        if not pdf_text.strip():
+            print("⚠️ No text extracted from PDF. File may be image-only or corrupted.")
+            return []
+        
+        # Extract tables using Claude with complete text (page by page approach)
+        print("🤖 Sending complete text to Claude for table extraction...")
+        tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name)
         
         if tables:
             # Add file information to tables
             for table in tables:
                 table['source_file'] = pdf_path.name
                 table['extraction_method'] = 'OCR' if used_ocr else 'Text'
+                table['total_text_length'] = len(pdf_text)
             
             # Save results to JSON
             if output_dir:
@@ -209,10 +303,12 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
                 table_name = table.get('table_name', f'Table {i+1}')
                 headers = table.get('headers', [])
                 data = table.get('data', [])
+                chunk_source = table.get('metadata', {}).get('chunk_source', 'Unknown')
                 print(f"  Table {i+1}: {table_name}")
                 print(f"    Headers: {headers}")
                 print(f"    Rows: {len(data)}")
                 print(f"    Columns: {len(headers)}")
+                print(f"    Source: Chunk {chunk_source}")
             
             return tables
         else:
