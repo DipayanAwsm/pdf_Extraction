@@ -129,5 +129,47 @@ Notes:
 - For best OCR accuracy, ensure PDFs are at least ~200 DPI when rasterized (handled by default).
 - You can tweak regex patterns for claim number/name/date in `parse_fields.py` to fit your documents.
 
+## Streamlit Web App (AWS Bedrock Claude)
+
+Use a browser UI to upload multiple PDFs (scanned or text), extract tables with Claude via AWS Bedrock, preview them, and export to a single Excel file with one sheet per table.
+
+### Prerequisites
+- Installed dependencies (already in requirements.txt):
+  - streamlit, boto3, pandas, openpyxl
+- AWS Bedrock access in your AWS account
+- Your AWS credentials:
+  - AWS Access Key ID
+  - AWS Secret Access Key
+  - AWS Session Token
+  - AWS Region (e.g., us-east-1)
+
+### Start the app
+```bash
+streamlit run streamlit_app.py
+```
+Then open `http://localhost:8501` in your browser if it does not open automatically.
+
+### Using the app
+1. Enter AWS credentials in the left sidebar and pick your region. Optionally click "Test AWS Connection".
+2. Upload one or more PDF files (scanned and text-based are supported). The app will OCR when needed.
+3. Click "Extract Tables" to process all PDFs using Claude. The app:
+   - Extracts text locally (with OCR fallback)
+   - Sends only text to Bedrock Claude to extract table-like structures
+   - Displays per-PDF results and a summary
+4. Review tables in the UI. Expand each table to see rows and metadata.
+5. Click "Download Excel File" to export all tables into `extracted_tables.xlsx` (one sheet per table).
+
+### Notes
+- The app uses model `anthropic.claude-3-sonnet-20240229-v1:0` on AWS Bedrock.
+- Scanned PDFs are processed with OCR locally (no image data is sent; only text is sent to Bedrock).
+- Sheet names are sanitized to meet Excel constraints (<=31 chars, no invalid characters).
+- If Claude returns non-JSON or partial JSON, the app attempts to parse the JSON segment; unparseable outputs are skipped with a warning.
+- Usage of Bedrock may incur AWS charges.
+
+### Troubleshooting
+- If Camelot/Tabula are installed but not needed for the Streamlit app, you can ignore Java/Ghostscript warnings; the app does not use them.
+- Ensure your AWS credentials have permission for Bedrock `bedrock:InvokeModel` in the selected region.
+- For very large PDFs, try splitting the file or uploading fewer at a time.
+
 
 
