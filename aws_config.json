@@ -1,0 +1,7 @@
+{
+    "access_key": "YOUR_ACCESS_KEY_ID",
+    "secret_key": "YOUR_SECRET_ACCESS_KEY",
+    "session_token": "YOUR_SESSION_TOKEN",
+    "region": "us-east-1",
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+}

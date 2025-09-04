@@ -79,7 +79,92 @@ def extract_text_from_pdf_page_by_page(pdf_path: str, use_ocr_fallback: bool = T
         return extract_text_from_pdf(pdf_path, use_ocr_fallback, dpi)
 
 
-def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_name: str) -> List[Dict[str, Any]]:
+def detect_line_of_business(pdf_text: str) -> str:
+    """Detect the line of business from PDF content."""
+    pdf_text_upper = pdf_text.upper()
+    
+    # Define business type patterns
+    business_patterns = {
+        'AUTO': [
+            'AUTO', 'AUTOMOBILE', 'VEHICLE', 'CAR', 'TRUCK', 'MOTOR',
+            'AUTO LIABILITY', 'AUTO PHYSICAL DAMAGE', 'PERSONAL AUTO',
+            'COMMERCIAL AUTO', 'GARAGE LIABILITY', 'MOTOR CARRIER'
+        ],
+        'GENERAL LIABILITY': [
+            'GENERAL LIABILITY', 'GL', 'COMMERCIAL GENERAL LIABILITY',
+            'CGL', 'PROPERTY', 'LIABILITY', 'BUSINESS LIABILITY',
+            'PROFESSIONAL LIABILITY', 'PRODUCTS LIABILITY'
+        ],
+        'WC': [
+            'WORKERS COMPENSATION', 'WORKER COMPENSATION', 'WC',
+            'WORKERS COMP', 'EMPLOYER LIABILITY', 'WORK COMP',
+            'WORKERS COMPENSATION AND EMPLOYERS LIABILITY'
+        ]
+    }
+    
+    # Count matches for each business type
+    business_scores = {}
+    for business_type, patterns in business_patterns.items():
+        score = 0
+        for pattern in patterns:
+            if pattern in pdf_text_upper:
+                score += pdf_text_upper.count(pattern)
+        business_scores[business_type] = score
+    
+    # Find the business type with highest score
+    if business_scores:
+        detected_business = max(business_scores, key=business_scores.get)
+        if business_scores[detected_business] > 0:
+            print(f"🏢 Detected Line of Business: {detected_business} (Score: {business_scores[detected_business]})")
+            return detected_business
+    
+    print("⚠️ Could not detect specific line of business")
+    return "UNKNOWN"
+
+
+def load_aws_config(config_file: str = "aws_config.json") -> Dict[str, str]:
+    """Load AWS credentials and model configuration from external configuration file."""
+    config_path = Path(config_file)
+    
+    if not config_path.exists():
+        print(f"❌ Configuration file not found: {config_path}")
+        print("Please create aws_config.json with your AWS credentials and model:")
+        print("""
+{
+    "access_key": "YOUR_ACCESS_KEY_ID",
+    "secret_key": "YOUR_SECRET_ACCESS_KEY", 
+    "session_token": "YOUR_SESSION_TOKEN",
+    "region": "us-east-1",
+    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+}
+        """)
+        return None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Validate required fields
+        required_fields = ['access_key', 'secret_key', 'session_token', 'region', 'model_id']
+        missing_fields = [field for field in required_fields if field not in config or not config[field]]
+        
+        if missing_fields:
+            print(f"❌ Missing required fields in config: {missing_fields}")
+            return None
+        
+        print(f"✅ AWS configuration loaded from: {config_path}")
+        print(f"🤖 Model configured: {config['model_id']}")
+        return config
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ Invalid JSON in config file: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error reading config file: {e}")
+        return None
+
+
+def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_name: str, model_id: str) -> List[Dict[str, Any]]:
     """Extract tables from PDF text using AWS Bedrock Claude with better handling of large content."""
     
     # Split text into manageable chunks if it's very long
@@ -114,15 +199,21 @@ def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_n
         print(f"🤖 Processing chunk {chunk_idx}/{len(text_chunks)} ({len(chunk)} chars)...")
         
         prompt = f"""
-        You are an expert at extracting structured data from PDF documents. 
+        You are an expert at extracting structured data from insurance and claims documents. 
         
         Please analyze the following PDF content chunk and extract ALL tables and structured data you can find.
         This is chunk {chunk_idx} of {len(text_chunks)} from the document.
+        
+        IMPORTANT: Also identify the Line of Business from these options:
+        1. AUTO - Automobile insurance, vehicle claims, motor vehicle liability
+        2. GENERAL LIABILITY - Commercial general liability, property, business liability
+        3. WC - Workers Compensation, employer liability, work comp claims
         
         For each table or structured section, provide:
         1. A descriptive name for the table/section
         2. The extracted data in a structured format (JSON)
         3. Any relevant metadata (headers, row counts, etc.)
+        4. Line of Business classification
         
         PDF Name: {pdf_name}
         Chunk: {chunk_idx}/{len(text_chunks)}
@@ -143,18 +234,20 @@ def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_n
                     "row_count": 2,
                     "column_count": 3,
                     "description": "Brief description of what this table contains",
-                    "chunk_source": {chunk_idx}
+                    "chunk_source": {chunk_idx},
+                    "line_of_business": "AUTO|GENERAL LIABILITY|WC"
                 }}
             }}
         ]
         
         If no structured tables are found, extract any organized information in a table-like format.
         Focus on finding tables, lists, and structured data in this chunk.
+        Be sure to classify the Line of Business based on the content.
         """
         
         try:
             response = bedrock_client.invoke_model(
-                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                modelId=model_id,
                 body=json.dumps({
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": 4000,
@@ -247,7 +340,7 @@ def save_to_excel(tables_data: List[Dict[str, Any]], output_path: str, pdf_name:
         return False
 
 
-def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
+def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id: str = None):
     """Process a single PDF file and extract tables using Claude."""
     pdf_path = Path(pdf_path)
     
@@ -275,9 +368,12 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
             print("⚠️ No text extracted from PDF. File may be image-only or corrupted.")
             return []
         
+        # Detect line of business
+        line_of_business = detect_line_of_business(pdf_text)
+        
         # Extract tables using Claude with complete text (page by page approach)
         print("🤖 Sending complete text to Claude for table extraction...")
-        tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name)
+        tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name, model_id)
         
         if tables:
             # Add file information to tables
@@ -285,20 +381,31 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
                 table['source_file'] = pdf_path.name
                 table['extraction_method'] = 'OCR' if used_ocr else 'Text'
                 table['total_text_length'] = len(pdf_text)
+                table['line_of_business'] = line_of_business
+                
+                # Ensure metadata has line of business
+                if 'metadata' not in table:
+                    table['metadata'] = {}
+                table['metadata']['line_of_business'] = line_of_business
+            
+            # Create filename with line of business
+            safe_business_name = line_of_business.replace(' ', '_').replace('&', 'AND')
+            base_filename = f"{pdf_path.stem}_{safe_business_name}"
             
             # Save results to JSON
             if output_dir:
-                json_path = Path(output_dir) / f"{pdf_path.stem}_claude_results.json"
+                json_path = Path(output_dir) / f"{base_filename}_claude_results.json"
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(tables, f, indent=2, ensure_ascii=False)
                 print(f"💾 JSON results saved to: {json_path}")
                 
                 # Save to Excel
-                excel_path = Path(output_dir) / f"{pdf_path.stem}_claude_results.xlsx"
+                excel_path = Path(output_dir) / f"{base_filename}_claude_results.xlsx"
                 save_to_excel(tables, str(excel_path), pdf_path.name)
             
             # Display summary
             print(f"📊 Summary for {pdf_path.name}:")
+            print(f"🏢 Line of Business: {line_of_business}")
             for i, table in enumerate(tables):
                 table_name = table.get('table_name', f'Table {i+1}')
                 headers = table.get('headers', [])
@@ -323,13 +430,18 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None):
 def main():
     parser = argparse.ArgumentParser(description="Extract tables from PDFs using Claude via AWS Bedrock")
     parser.add_argument("pdf_path", help="Path to PDF file or directory")
-    parser.add_argument("--access-key", required=True, help="AWS Access Key ID")
-    parser.add_argument("--secret-key", required=True, help="AWS Secret Access Key")
-    parser.add_argument("--session-token", required=True, help="AWS Session Token")
-    parser.add_argument("--region", default="us-east-1", help="AWS Region (default: us-east-1)")
+    parser.add_argument("--config", default="aws_config.json", help="Path to AWS configuration file (default: aws_config.json)")
     parser.add_argument("--output-dir", default="claude_results", help="Output directory for results (default: claude_results)")
     
     args = parser.parse_args()
+    
+    # Load AWS configuration
+    print("🔑 Loading AWS configuration...")
+    aws_config = load_aws_config(args.config)
+    
+    if not aws_config:
+        print("❌ Failed to load AWS configuration. Exiting.")
+        return
     
     # Create output directory if it doesn't exist
     output_dir = Path(args.output_dir)
@@ -339,10 +451,10 @@ def main():
     # Setup AWS client
     print("🔑 Setting up AWS Bedrock client...")
     bedrock_client = setup_aws_client(
-        args.access_key, 
-        args.secret_key, 
-        args.session_token, 
-        args.region
+        aws_config['access_key'], 
+        aws_config['secret_key'], 
+        aws_config['session_token'], 
+        aws_config['region']
     )
     
     if not bedrock_client:
@@ -356,7 +468,7 @@ def main():
     
     if pdf_path.is_file() and pdf_path.suffix.lower() == '.pdf':
         # Single PDF file
-        process_pdf(str(pdf_path), bedrock_client, args.output_dir)
+        process_pdf(str(pdf_path), bedrock_client, args.output_dir, aws_config['model_id'])
         
     elif pdf_path.is_dir():
         # Directory of PDFs
@@ -369,7 +481,7 @@ def main():
         
         all_results = []
         for pdf_file in pdf_files:
-            result = process_pdf(str(pdf_file), bedrock_client, args.output_dir)
+            result = process_pdf(str(pdf_file), bedrock_client, args.output_dir, aws_config['model_id'])
             if result:
                 all_results.extend(result)
         
