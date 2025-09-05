@@ -11,8 +11,18 @@ import argparse
 from pathlib import Path
 from typing import List, Dict, Any
 import pandas as pd
+import re
 
 from src.claim_extractor.extract_text import extract_text_from_pdf
+
+
+EVALUATION_DATE_PATTERNS = [
+    r"\b(?:evaluation\s*date|as\s*of|report\s*date|run\s*date|valuation\s*date)\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+]
+
+CARRIER_PATTERNS = [
+    r"\b(?:carrier|company|insurer|provider)\s*[:\-]\s*([A-Za-z0-9 &'.\-/]+)",
+]
 
 
 def setup_aws_client(access_key: str, secret_key: str, session_token: str, region: str):
@@ -491,9 +501,26 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
                     json.dump(tables, f, indent=2, ensure_ascii=False)
                 print(f"💾 JSON results saved to: {json_path}")
                 
-                # Save to Excel
+                # Save to Excel (raw extracted tables)
                 excel_path = target_dir / f"{base_filename}_claude_results.xlsx"
                 save_to_excel(tables, str(excel_path), pdf_path.name)
+
+                # If AUTO, also save normalized Excel with specific columns/sheets
+                if line_of_business == 'AUTO':
+                    norm = normalize_auto_records(tables, pdf_text)
+                    norm_excel_path = target_dir / f"{base_filename}_AUTO_normalized.xlsx"
+                    save_auto_normalized_excel(norm, str(norm_excel_path))
+                    print(f"💾 AUTO normalized Excel saved to: {norm_excel_path}")
+                elif line_of_business in ('GENERAL LIABILITY', 'GL'):
+                    norm = normalize_gl_records(tables, pdf_text)
+                    norm_excel_path = target_dir / f"{base_filename}_GL_normalized.xlsx"
+                    save_gl_normalized_excel(norm, str(norm_excel_path))
+                    print(f"💾 GL normalized Excel saved to: {norm_excel_path}")
+                elif line_of_business == 'WC':
+                    norm = normalize_wc_records(tables, pdf_text)
+                    norm_excel_path = target_dir / f"{base_filename}_WC_normalized.xlsx"
+                    save_wc_normalized_excel(norm, str(norm_excel_path))
+                    print(f"💾 WC normalized Excel saved to: {norm_excel_path}")
             
             # Display summary
             print(f"📊 Summary for {pdf_path.name}:")
@@ -517,6 +544,174 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
     except Exception as e:
         print(f"❌ Error processing {pdf_path.name}: {str(e)}")
         return None
+
+
+def _first_group(patterns, text: str) -> str:
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _normalize_date_str(s: str) -> str:
+    try:
+        from dateutil import parser as date_parser
+        return date_parser.parse(s, fuzzy=True).strftime("%Y-%m-%d")
+    except Exception:
+        return s or ""
+
+
+def _find_col_idx(headers, *candidates):
+    if not headers:
+        return None
+    lower = [str(h).strip().lower() for h in headers]
+    for cand in candidates:
+        cand_l = cand.lower()
+        if cand_l in lower:
+            return lower.index(cand_l)
+    # fuzzy contains
+    for i, h in enumerate(lower):
+        for cand in candidates:
+            if cand.lower() in h:
+                return i
+    return None
+
+
+def normalize_auto_records(tables: list, pdf_text: str) -> dict:
+    eval_raw = _first_group(EVALUATION_DATE_PATTERNS, pdf_text)
+    evaluation_date = _normalize_date_str(eval_raw) if eval_raw else ""
+    carrier = _first_group(CARRIER_PATTERNS, pdf_text)
+
+    claims = []
+    for t in tables:
+        headers = t.get('headers') or []
+        rows = t.get('data') or []
+        if not headers or not rows:
+            continue
+        i_claim = _find_col_idx(headers, 'claim number', 'claim no', 'claim#', 'reference', 'ref')
+        i_loss_date = _find_col_idx(headers, 'loss date', 'date of loss', 'dol', 'accident date')
+        i_paid = _find_col_idx(headers, 'paid loss', 'paid', 'indemnity paid', 'total paid')
+        i_reserve = _find_col_idx(headers, 'reserve', 'reserves', 'loss reserve', 'remaining reserve')
+        i_alae = _find_col_idx(headers, 'alae', 'allocated loss adjustment expense', 'expense', 'total expense')
+        i_carrier = _find_col_idx(headers, 'carrier', 'company', 'insurer', 'provider')
+
+        for r in rows:
+            rec = {
+                'carrier': carrier or (str(r[i_carrier]).strip() if i_carrier is not None and i_carrier < len(r) else ''),
+                'claim_number': (str(r[i_claim]).strip() if i_claim is not None and i_claim < len(r) else ''),
+                'loss_date': _normalize_date_str(str(r[i_loss_date]).strip()) if i_loss_date is not None and i_loss_date < len(r) else '',
+                'paid_loss': str(r[i_paid]).strip() if i_paid is not None and i_paid < len(r) else '',
+                'reserve': str(r[i_reserve]).strip() if i_reserve is not None and i_reserve < len(r) else '',
+                'alae': str(r[i_alae]).strip() if i_alae is not None and i_alae < len(r) else '',
+            }
+            # skip empty rows
+            if any(rec.values()):
+                claims.append(rec)
+
+    return {
+        'evaluation_date': evaluation_date,
+        'carrier': carrier,
+        'claims': claims,
+    }
+
+
+def save_auto_normalized_excel(norm: dict, excel_path: str):
+    import pandas as pd
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        # meta
+        meta_df = pd.DataFrame([{
+            'evaluation_date': norm.get('evaluation_date', ''),
+            'carrier': norm.get('carrier', ''),
+        }])
+        meta_df.to_excel(writer, sheet_name='meta', index=False)
+        # claims
+        claims = norm.get('claims') or []
+        if claims:
+            claims_df = pd.DataFrame(claims, columns=['carrier','claim_number','loss_date','paid_loss','reserve','alae'])
+            claims_df.to_excel(writer, sheet_name='auto_claims', index=False)
+        else:
+            pd.DataFrame(columns=['carrier','claim_number','loss_date','paid_loss','reserve','alae']).to_excel(writer, sheet_name='auto_claims', index=False)
+
+
+# GL and WC normalization
+
+def normalize_gl_records(tables: list, pdf_text: str) -> dict:
+    eval_raw = _first_group(EVALUATION_DATE_PATTERNS, pdf_text)
+    evaluation_date = _normalize_date_str(eval_raw) if eval_raw else ""
+    carrier = _first_group(CARRIER_PATTERNS, pdf_text)
+
+    claims = []
+    for t in tables:
+        headers = t.get('headers') or []
+        rows = t.get('data') or []
+        if not headers or not rows:
+            continue
+        i_claim = _find_col_idx(headers, 'claim number', 'claim no', 'claim#', 'reference', 'ref')
+        i_loss_date = _find_col_idx(headers, 'loss date', 'date of loss', 'dol', 'accident date')
+        i_bi_paid = _find_col_idx(headers, 'bodily injury paid loss', 'bi paid', 'paid bodily injury')
+        i_pd_paid = _find_col_idx(headers, 'property damage paid loss', 'pd paid', 'paid property damage')
+        i_bi_res = _find_col_idx(headers, 'bodily injury reserves', 'bi reserve', 'bodily injury reserve')
+        i_pd_res = _find_col_idx(headers, 'property damage reserves', 'pd reserve', 'property damage reserve')
+        i_alae = _find_col_idx(headers, 'alae', 'allocated loss adjustment expense', 'expense', 'total expense')
+        i_carrier = _find_col_idx(headers, 'carrier', 'company', 'insurer', 'provider')
+
+        for r in rows:
+            rec = {
+                'carrier': carrier or (str(r[i_carrier]).strip() if i_carrier is not None and i_carrier < len(r) else ''),
+                'claim_number': (str(r[i_claim]).strip() if i_claim is not None and i_claim < len(r) else ''),
+                'loss_date': _normalize_date_str(str(r[i_loss_date]).strip()) if i_loss_date is not None and i_loss_date < len(r) else '',
+                'bi_paid_loss': str(r[i_bi_paid]).strip() if i_bi_paid is not None and i_bi_paid < len(r) else '',
+                'pd_paid_loss': str(r[i_pd_paid]).strip() if i_pd_paid is not None and i_pd_paid < len(r) else '',
+                'bi_reserve': str(r[i_bi_res]).strip() if i_bi_res is not None and i_bi_res < len(r) else '',
+                'pd_reserve': str(r[i_pd_res]).strip() if i_pd_res is not None and i_pd_res < len(r) else '',
+                'alae': str(r[i_alae]).strip() if i_alae is not None and i_alae < len(r) else '',
+            }
+            if any(rec.values()):
+                claims.append(rec)
+
+    return {
+        'evaluation_date': evaluation_date,
+        'carrier': carrier,
+        'claims': claims,
+    }
+
+
+def save_gl_normalized_excel(norm: dict, excel_path: str):
+    import pandas as pd
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        meta_df = pd.DataFrame([{
+            'evaluation_date': norm.get('evaluation_date', ''),
+            'carrier': norm.get('carrier', ''),
+        }])
+        meta_df.to_excel(writer, sheet_name='meta', index=False)
+        claims = norm.get('claims') or []
+        cols = ['carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae']
+        if claims:
+            pd.DataFrame(claims, columns=cols).to_excel(writer, sheet_name='gl_claims', index=False)
+        else:
+            pd.DataFrame(columns=cols).to_excel(writer, sheet_name='gl_claims', index=False)
+
+
+def normalize_wc_records(tables: list, pdf_text: str) -> dict:
+    # As specified, WC uses the same set as GL in this request
+    return normalize_gl_records(tables, pdf_text)
+
+
+def save_wc_normalized_excel(norm: dict, excel_path: str):
+    import pandas as pd
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        meta_df = pd.DataFrame([{
+            'evaluation_date': norm.get('evaluation_date', ''),
+            'carrier': norm.get('carrier', ''),
+        }])
+        meta_df.to_excel(writer, sheet_name='meta', index=False)
+        claims = norm.get('claims') or []
+        cols = ['carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae']
+        if claims:
+            pd.DataFrame(claims, columns=cols).to_excel(writer, sheet_name='wc_claims', index=False)
+        else:
+            pd.DataFrame(columns=cols).to_excel(writer, sheet_name='wc_claims', index=False)
 
 
 def main():
