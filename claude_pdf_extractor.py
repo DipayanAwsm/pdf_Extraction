@@ -376,6 +376,55 @@ def _lob_folder_name(line_of_business: str) -> str:
     return "UNKNOWN"
 
 
+def classify_line_of_business_via_bedrock(bedrock_client, pdf_text: str, model_id: str) -> str:
+    """Classify line of business (AUTO, GENERAL LIABILITY, WC) using Claude via Bedrock.
+
+    Returns one of: 'AUTO', 'GENERAL LIABILITY', 'WC', or 'UNKNOWN' on failure.
+    """
+    try:
+        prompt = f"""
+You are an insurance domain expert. Read the following document text and classify the dominant line of business.
+Choose exactly one from this set:
+- AUTO
+- GENERAL LIABILITY
+- WC
+
+Return ONLY strict JSON: {{"line_of_business": "AUTO|GENERAL LIABILITY|WC"}} with no extra text.
+
+Document text:
+{pdf_text}
+"""
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+            }),
+        )
+        response_body = json.loads(response["body"].read())
+        content = response_body["content"][0]["text"]
+        # Extract JSON only
+        start_idx = content.find("{")
+        end_idx = content.rfind("}") + 1
+        if start_idx != -1 and end_idx > start_idx:
+            try:
+                obj = json.loads(content[start_idx:end_idx])
+                lob = (obj.get("line_of_business") or "").strip().upper()
+                if lob in {"AUTO", "GENERAL LIABILITY", "WC"}:
+                    return lob
+            except Exception:
+                pass
+        print("⚠️ Claude LOB classification not parseable; falling back to heuristic.")
+        return "UNKNOWN"
+    except Exception as exc:
+        print(f"❌ LOB classification via Bedrock failed: {exc}")
+        return "UNKNOWN"
+
+
 def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id: str = None, max_chunk_size: int = 15000, api_delay: int = 1):
     """Process a single PDF file and extract tables using Claude."""
     pdf_path = Path(pdf_path)
@@ -404,8 +453,10 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
             print("⚠️ No text extracted from PDF. File may be image-only or corrupted.")
             return []
         
-        # Detect line of business
-        line_of_business = detect_line_of_business(pdf_text)
+        # Detect line of business via API first; fallback to heuristic
+        line_of_business = classify_line_of_business_via_bedrock(bedrock_client, pdf_text, model_id)
+        if line_of_business == "UNKNOWN":
+            line_of_business = detect_line_of_business(pdf_text)
         
         # Extract tables using Claude with complete text (page by page approach)
         print("🤖 Sending complete text to Claude for table extraction...")
