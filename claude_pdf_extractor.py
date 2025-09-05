@@ -463,7 +463,7 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
             print("⚠️ No text extracted from PDF. File may be image-only or corrupted.")
             return []
         
-        # Detect line of business via API first; fallback to heuristic
+        # Detect line of business
         line_of_business = classify_line_of_business_via_bedrock(bedrock_client, pdf_text, model_id)
         if line_of_business == "UNKNOWN":
             line_of_business = detect_line_of_business(pdf_text)
@@ -505,22 +505,25 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
                 excel_path = target_dir / f"{base_filename}_claude_results.xlsx"
                 save_to_excel(tables, str(excel_path), pdf_path.name)
 
-                # If AUTO, also save normalized Excel with specific columns/sheets
+                # Normalized per LOB
+                normalized = None
                 if line_of_business == 'AUTO':
-                    norm = normalize_auto_records(tables, pdf_text)
+                    normalized = normalize_auto_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_AUTO_normalized.xlsx"
-                    save_auto_normalized_excel(norm, str(norm_excel_path))
+                    save_auto_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 AUTO normalized Excel saved to: {norm_excel_path}")
                 elif line_of_business in ('GENERAL LIABILITY', 'GL'):
-                    norm = normalize_gl_records(tables, pdf_text)
+                    normalized = normalize_gl_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_GL_normalized.xlsx"
-                    save_gl_normalized_excel(norm, str(norm_excel_path))
+                    save_gl_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 GL normalized Excel saved to: {norm_excel_path}")
                 elif line_of_business == 'WC':
-                    norm = normalize_wc_records(tables, pdf_text)
+                    normalized = normalize_wc_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_WC_normalized.xlsx"
-                    save_wc_normalized_excel(norm, str(norm_excel_path))
+                    save_wc_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 WC normalized Excel saved to: {norm_excel_path}")
+            else:
+                normalized = None
             
             # Display summary
             print(f"📊 Summary for {pdf_path.name}:")
@@ -536,14 +539,117 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
                 print(f"    Columns: {len(headers)}")
                 print(f"    Source: Chunk {chunk_source}")
             
-            return tables
+            return {
+                'lob': line_of_business,
+                'normalized': normalized,
+                'source_file': pdf_path.name,
+            }
         else:
             print(f"⚠️ No tables found in {pdf_path.name}")
-            return []
+            return {'lob': line_of_business, 'normalized': None, 'source_file': pdf_path.name}
             
     except Exception as e:
         print(f"❌ Error processing {pdf_path.name}: {str(e)}")
         return None
+
+
+def _write_consolidated_excels(collected: dict, output_dir: Path):
+    import pandas as pd
+    # collected keys: 'AUTO', 'GL', 'WC' → list of normalized dicts (also may include 'GENERAL LIABILITY')
+    auto_df = None
+    gl_df = None
+    wc_df = None
+
+    # AUTO
+    entries = []
+    for entry in (collected.get('AUTO') or []):
+        eval_date = entry.get('evaluation_date', '')
+        carrier = entry.get('carrier', '')
+        for claim in entry.get('claims', []):
+            row = {
+                'evaluation_date': eval_date,
+                'carrier': claim.get('carrier') or carrier,
+                'claim_number': claim.get('claim_number', ''),
+                'loss_date': claim.get('loss_date', ''),
+                'paid_loss': claim.get('paid_loss', ''),
+                'reserve': claim.get('reserve', ''),
+                'alae': claim.get('alae', ''),
+            }
+            entries.append(row)
+    if entries:
+        auto_df = pd.DataFrame(entries, columns=['evaluation_date','carrier','claim_number','loss_date','paid_loss','reserve','alae'])
+        out_dir = output_dir / 'auto'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / 'AUTO_consolidated.xlsx'
+        with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+            auto_df.to_excel(writer, sheet_name='auto_claims', index=False)
+        print(f"📚 Consolidated AUTO Excel written: {out_path}")
+
+    # GL (merge keys 'GL' and 'GENERAL LIABILITY')
+    entries = []
+    for entry in (collected.get('GL') or []) + (collected.get('GENERAL LIABILITY') or []):
+        eval_date = entry.get('evaluation_date', '')
+        carrier = entry.get('carrier', '')
+        for claim in entry.get('claims', []):
+            row = {
+                'evaluation_date': eval_date,
+                'carrier': claim.get('carrier') or carrier,
+                'claim_number': claim.get('claim_number', ''),
+                'loss_date': claim.get('loss_date', ''),
+                'bi_paid_loss': claim.get('bi_paid_loss', ''),
+                'pd_paid_loss': claim.get('pd_paid_loss', ''),
+                'bi_reserve': claim.get('bi_reserve', ''),
+                'pd_reserve': claim.get('pd_reserve', ''),
+                'alae': claim.get('alae', ''),
+            }
+            entries.append(row)
+    if entries:
+        gl_df = pd.DataFrame(entries, columns=['evaluation_date','carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae'])
+        out_dir = output_dir / 'GL'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / 'GL_consolidated.xlsx'
+        with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+            gl_df.to_excel(writer, sheet_name='gl_claims', index=False)
+        print(f"📚 Consolidated GL Excel written: {out_path}")
+
+    # WC
+    entries = []
+    for entry in (collected.get('WC') or []):
+        eval_date = entry.get('evaluation_date', '')
+        carrier = entry.get('carrier', '')
+        for claim in entry.get('claims', []):
+            row = {
+                'evaluation_date': eval_date,
+                'carrier': claim.get('carrier') or carrier,
+                'claim_number': claim.get('claim_number', ''),
+                'loss_date': claim.get('loss_date', ''),
+                'bi_paid_loss': claim.get('bi_paid_loss', ''),
+                'pd_paid_loss': claim.get('pd_paid_loss', ''),
+                'bi_reserve': claim.get('bi_reserve', ''),
+                'pd_reserve': claim.get('pd_reserve', ''),
+                'alae': claim.get('alae', ''),
+            }
+            entries.append(row)
+    if entries:
+        wc_df = pd.DataFrame(entries, columns=['evaluation_date','carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae'])
+        out_dir = output_dir / 'WC'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / 'WC_consolidated.xlsx'
+        with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+            wc_df.to_excel(writer, sheet_name='wc_claims', index=False)
+        print(f"📚 Consolidated WC Excel written: {out_path}")
+
+    # Combined result.xlsx at root with available sheets
+    combined_path = output_dir / 'result.xlsx'
+    if any([auto_df is not None, gl_df is not None, wc_df is not None]):
+        with pd.ExcelWriter(combined_path, engine='openpyxl') as writer:
+            if auto_df is not None:
+                auto_df.to_excel(writer, sheet_name='auto_claims', index=False)
+            if gl_df is not None:
+                gl_df.to_excel(writer, sheet_name='gl_claims', index=False)
+            if wc_df is not None:
+                wc_df.to_excel(writer, sheet_name='wc_claims', index=False)
+        print(f"📘 Combined consolidated Excel written: {combined_path}")
 
 
 def _first_group(patterns, text: str) -> str:
@@ -755,9 +861,18 @@ def main():
     
     if pdf_path.is_file() and pdf_path.suffix.lower() == '.pdf':
         # Single PDF file
-        process_pdf(str(pdf_path), bedrock_client, args.output_dir, aws_config['model_id'], 
+        result = process_pdf(str(pdf_path), bedrock_client, args.output_dir, aws_config['model_id'], 
                    aws_config['max_chunk_size'], aws_config['api_delay'])
         
+        if result:
+            print(f"\n📊 Summary for {pdf_path.name}:")
+            print(f"🏢 Line of Business: {result['lob']}")
+            if result['normalized']:
+                print(f"💾 Normalized data saved to: {output_dir.absolute()}")
+                _write_consolidated_excels({result['lob']: [result['normalized']]}, output_dir)
+            else:
+                print("⚠️ No normalized data available for this PDF.")
+            
     elif pdf_path.is_dir():
         # Directory of PDFs
         pdf_files = list(pdf_path.glob("*.pdf"))
@@ -767,31 +882,23 @@ def main():
         
         print(f"📁 Found {len(pdf_files)} PDF files")
         
-        all_results = []
+        collected_by_lob = {'AUTO': [], 'GENERAL LIABILITY': [], 'GL': [], 'WC': []}
         for pdf_file in pdf_files:
             result = process_pdf(str(pdf_file), bedrock_client, args.output_dir, aws_config['model_id'],
                                aws_config['max_chunk_size'], aws_config['api_delay'])
-            if result:
-                all_results.extend(result)
+            if result and result.get('normalized'):
+                lob = result.get('lob')
+                if lob in collected_by_lob:
+                    collected_by_lob[lob].append(result['normalized'])
+                elif lob == 'GL':
+                    collected_by_lob['GL'].append(result['normalized'])
+                else:
+                    # map unknown to nothing
+                    pass
         
-        # Save combined results
-        if all_results:
-            # Combined JSON
-            combined_json_path = output_dir / "all_claude_results.json"
-            with open(combined_json_path, 'w', encoding='utf-8') as f:
-                json.dump(all_results, f, indent=2, ensure_ascii=False)
-            print(f"\n💾 Combined JSON results saved to: {combined_json_path}")
-            
-            # Combined Excel with all tables
-            combined_excel_path = output_dir / "all_claude_results.xlsx"
-            save_to_excel(all_results, str(combined_excel_path))
-            
-            print(f"📊 Total tables extracted: {len(all_results)}")
-            print(f"📁 All results saved to: {output_dir.absolute()}")
-            
-    else:
-        print(f"❌ Invalid path: {pdf_path}")
-        print("Please provide a valid PDF file or directory containing PDFs")
+        # Write consolidated files
+        _write_consolidated_excels(collected_by_lob, output_dir)
+        print(f"📁 All results saved to: {output_dir.absolute()}")
 
 
 if __name__ == "__main__":
