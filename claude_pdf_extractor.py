@@ -122,53 +122,78 @@ def detect_line_of_business(pdf_text: str) -> str:
     return "UNKNOWN"
 
 
-def load_aws_config(config_file: str = "aws_config.json") -> Dict[str, str]:
-    """Load AWS credentials and model configuration from external configuration file."""
+def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
+    """Load AWS credentials and model configuration from Python config file."""
     config_path = Path(config_file)
     
     if not config_path.exists():
         print(f"❌ Configuration file not found: {config_path}")
-        print("Please create aws_config.json with your AWS credentials and model:")
+        print("Please create config.py with your AWS credentials and model:")
         print("""
-{
-    "access_key": "YOUR_ACCESS_KEY_ID",
-    "secret_key": "YOUR_SECRET_ACCESS_KEY", 
-    "session_token": "YOUR_SESSION_TOKEN",
-    "region": "us-east-1",
-    "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
-}
+# AWS Configuration
+AWS_ACCESS_KEY = "YOUR_ACCESS_KEY_ID"
+AWS_SECRET_KEY = "YOUR_SECRET_ACCESS_KEY"
+AWS_SESSION_TOKEN = "YOUR_SESSION_TOKEN"
+AWS_REGION = "us-east-1"
+MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
         """)
         return None
     
     try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        # Import the config file as a module
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        
+        # Extract configuration values
+        config = {
+            'access_key': getattr(config_module, 'AWS_ACCESS_KEY', None),
+            'secret_key': getattr(config_module, 'AWS_SECRET_KEY', None),
+            'session_token': getattr(config_module, 'AWS_SESSION_TOKEN', None),
+            'region': getattr(config_module, 'AWS_REGION', None),
+            'model_id': getattr(config_module, 'MODEL_ID', None),
+            'max_chunk_size': getattr(config_module, 'MAX_CHUNK_SIZE', 15000),
+            'api_delay': getattr(config_module, 'API_DELAY', 1)
+        }
         
         # Validate required fields
         required_fields = ['access_key', 'secret_key', 'session_token', 'region', 'model_id']
-        missing_fields = [field for field in required_fields if field not in config or not config[field]]
+        missing_fields = [field for field in required_fields if not config[field]]
         
         if missing_fields:
             print(f"❌ Missing required fields in config: {missing_fields}")
             return None
         
-        print(f"✅ AWS configuration loaded from: {config_path}")
+        # Validate model ID format
+        valid_model_prefixes = [
+            "anthropic.claude-3-sonnet",
+            "anthropic.claude-3-haiku", 
+            "anthropic.claude-3-opus",
+            "anthropic.claude-v2",
+            "anthropic.claude-instant"
+        ]
+        
+        model_is_valid = any(config['model_id'].startswith(prefix) for prefix in valid_model_prefixes)
+        if not model_is_valid:
+            print(f"⚠️ Warning: Model ID '{config['model_id']}' may not be valid")
+            print("Valid model prefixes:", valid_model_prefixes)
+        
+        print(f"✅ Configuration loaded from: {config_path}")
         print(f"🤖 Model configured: {config['model_id']}")
+        print(f"🌍 AWS Region: {config['region']}")
+        
         return config
         
-    except json.JSONDecodeError as e:
-        print(f"❌ Invalid JSON in config file: {e}")
-        return None
     except Exception as e:
         print(f"❌ Error reading config file: {e}")
         return None
 
 
-def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_name: str, model_id: str) -> List[Dict[str, Any]]:
+def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_name: str, model_id: str, max_chunk_size: int = 15000, api_delay: int = 1) -> List[Dict[str, Any]]:
     """Extract tables from PDF text using AWS Bedrock Claude with better handling of large content."""
     
     # Split text into manageable chunks if it's very long
-    max_chunk_size = 15000  # Claude can handle this size well
     text_chunks = []
     
     if len(pdf_text) > max_chunk_size:
@@ -285,7 +310,7 @@ def extract_tables_with_claude_page_by_page(bedrock_client, pdf_text: str, pdf_n
         
         # Add delay between chunks to prevent rate limiting
         import time
-        time.sleep(1)
+        time.sleep(api_delay)
     
     print(f"🎯 Total tables extracted across all chunks: {len(all_tables)}")
     return all_tables
@@ -340,7 +365,18 @@ def save_to_excel(tables_data: List[Dict[str, Any]], output_path: str, pdf_name:
         return False
 
 
-def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id: str = None):
+def _lob_folder_name(line_of_business: str) -> str:
+    lob = (line_of_business or "UNKNOWN").upper().strip()
+    if lob == "AUTO":
+        return "auto"
+    if lob in ("GENERAL LIABILITY", "GL"):
+        return "GL"
+    if lob == "WC":
+        return "WC"
+    return "UNKNOWN"
+
+
+def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id: str = None, max_chunk_size: int = 15000, api_delay: int = 1):
     """Process a single PDF file and extract tables using Claude."""
     pdf_path = Path(pdf_path)
     
@@ -373,7 +409,7 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
         
         # Extract tables using Claude with complete text (page by page approach)
         print("🤖 Sending complete text to Claude for table extraction...")
-        tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name, model_id)
+        tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name, model_id, max_chunk_size, api_delay)
         
         if tables:
             # Add file information to tables
@@ -392,15 +428,20 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
             safe_business_name = line_of_business.replace(' ', '_').replace('&', 'AND')
             base_filename = f"{pdf_path.stem}_{safe_business_name}"
             
+            # Determine subfolder by LOB and ensure it exists
+            lob_folder = _lob_folder_name(line_of_business)
+            target_dir = Path(output_dir) / lob_folder if output_dir else Path.cwd() / lob_folder
+            target_dir.mkdir(parents=True, exist_ok=True)
+            
             # Save results to JSON
             if output_dir:
-                json_path = Path(output_dir) / f"{base_filename}_claude_results.json"
+                json_path = target_dir / f"{base_filename}_claude_results.json"
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(tables, f, indent=2, ensure_ascii=False)
                 print(f"💾 JSON results saved to: {json_path}")
                 
                 # Save to Excel
-                excel_path = Path(output_dir) / f"{base_filename}_claude_results.xlsx"
+                excel_path = target_dir / f"{base_filename}_claude_results.xlsx"
                 save_to_excel(tables, str(excel_path), pdf_path.name)
             
             # Display summary
@@ -430,14 +471,14 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
 def main():
     parser = argparse.ArgumentParser(description="Extract tables from PDFs using Claude via AWS Bedrock")
     parser.add_argument("pdf_path", help="Path to PDF file or directory")
-    parser.add_argument("--config", default="aws_config.json", help="Path to AWS configuration file (default: aws_config.json)")
+    parser.add_argument("--config", default="config.py", help="Path to Python configuration file (default: config.py)")
     parser.add_argument("--output-dir", default="claude_results", help="Output directory for results (default: claude_results)")
     
     args = parser.parse_args()
     
     # Load AWS configuration
     print("🔑 Loading AWS configuration...")
-    aws_config = load_aws_config(args.config)
+    aws_config = load_aws_config_from_py(args.config)
     
     if not aws_config:
         print("❌ Failed to load AWS configuration. Exiting.")
@@ -468,7 +509,8 @@ def main():
     
     if pdf_path.is_file() and pdf_path.suffix.lower() == '.pdf':
         # Single PDF file
-        process_pdf(str(pdf_path), bedrock_client, args.output_dir, aws_config['model_id'])
+        process_pdf(str(pdf_path), bedrock_client, args.output_dir, aws_config['model_id'], 
+                   aws_config['max_chunk_size'], aws_config['api_delay'])
         
     elif pdf_path.is_dir():
         # Directory of PDFs
@@ -481,7 +523,8 @@ def main():
         
         all_results = []
         for pdf_file in pdf_files:
-            result = process_pdf(str(pdf_file), bedrock_client, args.output_dir, aws_config['model_id'])
+            result = process_pdf(str(pdf_file), bedrock_client, args.output_dir, aws_config['model_id'],
+                               aws_config['max_chunk_size'], aws_config['api_delay'])
             if result:
                 all_results.extend(result)
         
