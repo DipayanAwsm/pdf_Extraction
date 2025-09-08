@@ -435,6 +435,115 @@ Document text:
         return "UNKNOWN"
 
 
+def extract_lob_fields_via_bedrock(bedrock_client, pdf_text: str, model_id: str, lob: str) -> dict:
+    """Use LLM to extract normalized fields per LOB directly from full text.
+
+    Returns a dict with keys:
+      - evaluation_date: str (YYYY-MM-DD if possible)
+      - carrier: str
+      - claims: List[Dict[...] per LOB schema]
+    or empty dict on failure.
+    """
+    try:
+        lob = (lob or "").upper()
+        if lob == 'AUTO':
+            schema = {
+                "evaluation_date": "string",
+                "carrier": "string",
+                "claims": [
+                    {
+                        "claim_number": "string",
+                        "loss_date": "string",
+                        "paid_loss": "string",
+                        "reserve": "string",
+                        "alae": "string"
+                    }
+                ]
+            }
+            guidance = "For AUTO, extract: evaluation_date, carrier, and per-claim fields: claim_number, loss_date, paid_loss, reserve, alae."
+        elif lob in ('GENERAL LIABILITY','GL'):
+            schema = {
+                "evaluation_date": "string",
+                "carrier": "string",
+                "claims": [
+                    {
+                        "claim_number": "string",
+                        "loss_date": "string",
+                        "bi_paid_loss": "string",
+                        "pd_paid_loss": "string",
+                        "bi_reserve": "string",
+                        "pd_reserve": "string",
+                        "alae": "string"
+                    }
+                ]
+            }
+            guidance = "For GL, extract: evaluation_date, carrier, and per-claim: bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae."
+        elif lob == 'WC':
+            schema = {
+                "evaluation_date": "string",
+                "carrier": "string",
+                "claims": [
+                    {
+                        "claim_number": "string",
+                        "loss_date": "string",
+                        "bi_paid_loss": "string",
+                        "pd_paid_loss": "string",
+                        "bi_reserve": "string",
+                        "pd_reserve": "string",
+                        "alae": "string"
+                    }
+                ]
+            }
+            guidance = "For WC, extract: evaluation_date, carrier, and per-claim: bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae."
+        else:
+            return {}
+
+        prompt = f"""
+You are an insurance data extraction assistant.
+Given the document text, extract the following fields for line of business: {lob}.
+{guidance}
+
+Return STRICT JSON ONLY (no prose) matching this schema:
+{schema}
+
+Normalization rules:
+- Return dates in ISO format if possible (YYYY-MM-DD). If not sure, keep as found.
+- Keep currency/amount strings as-is (do not calculate).
+- If a field is missing, use an empty string.
+- Claims should be in document order.
+
+Document text:
+{pdf_text}
+"""
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4000,
+                "temperature": 0.0,
+                "messages": [{"role":"user","content": prompt}]
+            })
+        )
+        response_body = json.loads(response['body'].read())
+        content = response_body['content'][0]['text']
+        start = content.find('{')
+        end = content.rfind('}') + 1
+        if start != -1 and end > start:
+            obj = json.loads(content[start:end])
+            # Basic shape check
+            if isinstance(obj, dict) and 'claims' in obj:
+                # Ensure keys exist
+                obj.setdefault('evaluation_date', '')
+                obj.setdefault('carrier', '')
+                if not isinstance(obj.get('claims'), list):
+                    obj['claims'] = []
+                return obj
+        return {}
+    except Exception as e:
+        print(f"⚠️ LLM structured extraction failed: {e}")
+        return {}
+
+
 def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id: str = None, max_chunk_size: int = 15000, api_delay: int = 1):
     """Process a single PDF file and extract tables using Claude."""
     pdf_path = Path(pdf_path)
@@ -473,6 +582,17 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
         tables = extract_tables_with_claude_page_by_page(bedrock_client, pdf_text, pdf_path.name, model_id, max_chunk_size, api_delay)
         
         if tables:
+            # Optionally augment with Camelot tables
+            try:
+                from config import USE_CAMELOT, CAMELOT_FLAVORS, CAMELOT_PAGES
+            except Exception:
+                USE_CAMELOT, CAMELOT_FLAVORS, CAMELOT_PAGES = False, [], "all"
+            if USE_CAMELOT:
+                camelot_tables = _try_camelot_tables(str(pdf_path), CAMELOT_FLAVORS or ["lattice","stream"], CAMELOT_PAGES or "all")
+                if camelot_tables:
+                    tables.extend(camelot_tables)
+                    print(f"➕ Augmented with {len(camelot_tables)} Camelot tables")
+
             # Add file information to tables
             for table in tables:
                 table['source_file'] = pdf_path.name
@@ -505,20 +625,22 @@ def process_pdf(pdf_path: str, bedrock_client, output_dir: str = None, model_id:
                 excel_path = target_dir / f"{base_filename}_claude_results.xlsx"
                 save_to_excel(tables, str(excel_path), pdf_path.name)
 
-                # Normalized per LOB
+                # Normalized per LOB using LLM first, fallback to heuristic table normalization
                 normalized = None
+                llm_norm = extract_lob_fields_via_bedrock(bedrock_client, pdf_text, model_id, line_of_business)
+
                 if line_of_business == 'AUTO':
-                    normalized = normalize_auto_records(tables, pdf_text)
+                    normalized = llm_norm if llm_norm else normalize_auto_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_AUTO_normalized.xlsx"
                     save_auto_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 AUTO normalized Excel saved to: {norm_excel_path}")
                 elif line_of_business in ('GENERAL LIABILITY', 'GL'):
-                    normalized = normalize_gl_records(tables, pdf_text)
+                    normalized = llm_norm if llm_norm else normalize_gl_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_GL_normalized.xlsx"
                     save_gl_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 GL normalized Excel saved to: {norm_excel_path}")
                 elif line_of_business == 'WC':
-                    normalized = normalize_wc_records(tables, pdf_text)
+                    normalized = llm_norm if llm_norm else normalize_wc_records(tables, pdf_text)
                     norm_excel_path = target_dir / f"{base_filename}_WC_normalized.xlsx"
                     save_wc_normalized_excel(normalized, str(norm_excel_path))
                     print(f"💾 WC normalized Excel saved to: {norm_excel_path}")

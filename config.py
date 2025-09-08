@@ -18,3 +18,8 @@ MAX_CHUNK_SIZE = 15000
 
 # Optional: Delay between API calls (seconds)
 API_DELAY = 1
+
+# Table extraction via Camelot (optional)
+USE_CAMELOT = True
+CAMELOT_FLAVORS = ["lattice", "stream"]  # try both
+CAMELOT_PAGES = "all"

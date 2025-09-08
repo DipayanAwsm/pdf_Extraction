@@ -1,0 +1,136 @@
+Claude PDF Extractor - How It Works
+==================================
+
+Overview
+--------
+This tool extracts structured claims data from insurance PDFs (AUTO, GL, WC) using a hybrid pipeline:
+1) Full-text extraction (with OCR fallback) page-by-page
+2) Line-of-business (LoB) classification (Claude via Bedrock → heuristic fallback)
+3) LLM-first structured extraction per LoB (Claude) → heuristic table normalization fallback
+4) Per-file normalized Excel outputs per LoB
+5) Consolidation across directories into LoB-specific Excel files and a combined result.xlsx
+
+Configuration
+-------------
+- Edit config.py with your AWS credentials and model settings:
+  - AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_SESSION_TOKEN, AWS_REGION
+  - MODEL_ID (e.g., anthropic.claude-3-sonnet-20240229-v1:0)
+  - MAX_CHUNK_SIZE (default 15000) controls chunking of long documents
+  - API_DELAY (default 1 second) between Bedrock calls to avoid throttling
+
+CLI Usage
+---------
+- Single PDF:
+  python claude_pdf_extractor.py /path/to/file.pdf --config config.py --output-dir claude_results
+
+- Directory of PDFs:
+  python claude_pdf_extractor.py /path/to/folder --config config.py --output-dir claude_results
+
+Key Stages
+----------
+1) Page-by-Page Text Extraction
+- Function: extract_text_from_pdf_page_by_page
+- Attempts native text extraction per page via pdfplumber
+- If a page has no text, it rasterizes that page (pdf2image) and runs Tesseract OCR for that page
+- Appends a page delimiter marker (--- PAGE N ---) to preserve page boundaries
+- Returns (full_text, used_ocr flag)
+
+2) Line-of-Business Classification (AUTO, GL, WC)
+- Primary: classify_line_of_business_via_bedrock
+  - Sends a short classification prompt to Claude (Bedrock) and expects strict JSON: {"line_of_business": "AUTO|GENERAL LIABILITY|WC"}
+  - Parses JSON. If invalid or missing, returns UNKNOWN
+- Fallback: detect_line_of_business
+  - Scores keyword patterns for AUTO, GENERAL LIABILITY, WC in the extracted text
+  - Picks the highest scoring label; returns UNKNOWN if no signals found
+
+3) LLM-First Structured Extraction Per LoB
+- Function: extract_lob_fields_via_bedrock
+  - Given the LoB (AUTO / GL / WC), it sends a schema-specific extraction prompt to Claude
+  - Expected output (strict JSON only):
+    - AUTO: {evaluation_date, carrier, claims: [{claim_number, loss_date, paid_loss, reserve, alae}]}
+    - GL:   {evaluation_date, carrier, claims: [{claim_number, loss_date, bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae}]}
+    - WC:   same schema as GL
+  - If the LLM returns well-formed JSON, this becomes the normalized output for the PDF
+  - If the output is empty or invalid, the pipeline falls back to heuristic table normalization
+
+4) Heuristic Table Normalization (Fallback)
+- Functions:
+  - normalize_auto_records
+  - normalize_gl_records
+  - normalize_wc_records
+- These scan all Claude-extracted tables (from earlier step), try to align headers to expected fields, and produce normalized structures:
+  - evaluation_date: Detected from text via patterns (e.g., "Evaluation Date", "As of", "Valuation Date", etc.)
+  - carrier: Detected from text (e.g., "Carrier:") or table column if present
+  - claims: list of rows with mapped columns depending on LoB
+- Date strings are normalized to YYYY-MM-DD when possible; otherwise original strings are retained
+
+5) Per-File Outputs (organized by LoB)
+- In process_pdf:
+  - A per-file target directory is chosen by LoB (auto, GL, WC). Created if missing.
+  - Writes raw extraction (all tables) to: <stem>_<LOB>_claude_results.json and <stem>_<LOB>_claude_results.xlsx
+  - Writes normalized Excel per LoB:
+    - AUTO → <stem>_AUTO_normalized.xlsx with two sheets:
+      - meta (evaluation_date, carrier)
+      - auto_claims (carrier, claim_number, loss_date, paid_loss, reserve, alae)
+    - GL → <stem>_GL_normalized.xlsx with two sheets:
+      - meta (evaluation_date, carrier)
+      - gl_claims (carrier, claim_number, loss_date, bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae)
+    - WC → <stem>_WC_normalized.xlsx with two sheets:
+      - meta (evaluation_date, carrier)
+      - wc_claims (carrier, claim_number, loss_date, bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae)
+
+6) Consolidation (Directory Mode)
+- After processing all PDFs in a directory, the tool aggregates normalized records per LoB and writes:
+  - auto/AUTO_consolidated.xlsx
+  - GL/GL_consolidated.xlsx
+  - WC/WC_consolidated.xlsx
+- Additionally, it writes a combined workbook at the root of --output-dir:
+  - result.xlsx with sheets auto_claims, gl_claims, wc_claims (only created for LoBs with data)
+
+LLM Interactions (AWS Bedrock → Claude)
+---------------------------------------
+- Classification (small prompt): one-of selection: AUTO, GENERAL LIABILITY, WC
+- Chunked table extraction:
+  - For very long documents, the text is split into chunks (MAX_CHUNK_SIZE, preserving page boundaries when possible)
+  - Each chunk is sent to Claude with instructions to extract tables; results are aggregated
+- LLM-normalization:
+  - A single prompt with the full document text requests strict-JSON normalized output for the detected LoB
+  - On parse failure, the code falls back to heuristic normalization
+
+Error Handling & Robustness
+---------------------------
+- If Bedrock requests fail or JSON cannot be parsed, the pipeline continues with fallback logic
+- If a page has no text (vector), OCR is used for that page only
+- All directories needed for outputs are created automatically
+- Large documents are processed incrementally to control memory and token usage
+
+File/Folder Layout (example)
+----------------------------
+--output-dir/ (e.g., claude_results)
+  result.xlsx                     # combined sheets across LoBs
+  auto/
+    <name>_AUTO_normalized.xlsx
+    AUTO_consolidated.xlsx
+    <name>_AUTO_claude_results.json
+    <name>_AUTO_claude_results.xlsx
+  GL/
+    <name>_GL_normalized.xlsx
+    GL_consolidated.xlsx
+    <name>_GENERAL_LIABILITY_claude_results.json
+    <name>_GENERAL_LIABILITY_claude_results.xlsx
+  WC/
+    <name>_WC_normalized.xlsx
+    WC_consolidated.xlsx
+    <name>_WC_claude_results.json
+    <name>_WC_claude_results.xlsx
+
+Notes & Tips
+------------
+- MODEL_ID can be switched in config.py (e.g., Sonnet ↔ Haiku ↔ Opus) without code changes
+- If a PDF is entirely scanned and OCR quality is poor, LLM extraction may be limited; try higher DPI or better originals
+- Heuristic normalization is more resilient when tables have clear headers
+- For directory runs, ensure each PDF is single-LoB to keep outputs consistent
+
+End
+---
+This document explains the control flow and major components so you can extend or debug the pipeline as needed.
