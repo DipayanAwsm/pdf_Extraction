@@ -24,6 +24,18 @@ def _extract_text_ocr(pdf_path: str, dpi: int = 300, lang: str = "eng") -> str:
     return "\n".join(ocr_pages).strip()
 
 
+def _extract_text_fitz(pdf_path: str) -> str:
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        chunks = []
+        for page in doc:
+            chunks.append(page.get_text("text") or "")
+        return "\n".join(chunks).strip()
+    except Exception:
+        return ""
+
+
 def extract_text_from_pdf(pdf_path: str, use_ocr_fallback: bool = True, dpi: int = 300) -> Tuple[str, bool]:
     """
     Extract text from a PDF. Try native text first; optionally fall back to OCR.
@@ -33,8 +45,16 @@ def extract_text_from_pdf(pdf_path: str, use_ocr_fallback: bool = True, dpi: int
     if not os.path.isfile(pdf_path):
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
+    # Try PyMuPDF first for robust layout extraction
+    fitz_text = _extract_text_fitz(pdf_path)
+
     text = _extract_text_native(pdf_path)
     used_ocr = False
+
+    # Heuristic: pick the longer non-whitespace between fitz and native
+    candidates = [t for t in [fitz_text, text] if (t or "").strip()]
+    if candidates:
+        text = max(candidates, key=lambda s: len(s))
 
     # Heuristic: if too little text or mostly whitespace, try OCR
     if use_ocr_fallback:

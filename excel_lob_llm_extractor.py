@@ -8,7 +8,7 @@ import pandas as pd
 import boto3
 
 # Reuse normalization utils from PDF code where useful
-from src.claim_extractor.extract_text import extract_text_from_pdf  # not used here, placeholder for structure
+from src.claim_extractor.extract_text import extract_text_from_pdf, _extract_text_fitz
 
 
 def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
@@ -64,13 +64,29 @@ def _sheet_to_text(df: pd.DataFrame, sheet_name: str) -> str:
     return "\n".join(lines)
 
 
+def _extract_carrier_from_text(text: str) -> str:
+    import re
+    patterns = [
+        r"\b(?:carrier|company|insurer|provider)\s*[:\-]\s*([A-Za-z0-9 &'.\-/]+)",
+        r"\b([A-Z][A-Za-z0-9 &'.\-/]+(?:Insurance|Ins|Corp|Corporation|Company|Co|LLC|Inc))\b",
+        r"\b(?:Policy\s*holder|Insured)\s*[:\-]\s*([A-Za-z0-9 &'.\-/]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            if len(candidate) > 2:  # basic length filter
+                return candidate
+    return ""
+
+
 def classify_lob(bedrock_client, model_id: str, text: str) -> str:
     prompt = f"""
-You are an insurance domain expert. Classify the following sheet content into one line of business.
+You are an insurance domain expert. Classify the following content into one line of business.
 Choose exactly one of: AUTO, GENERAL LIABILITY, WC
 Return strict JSON only: {{"lob": "AUTO|GENERAL LIABILITY|WC"}}
 
-Sheet content:\n{text}
+Content:\n{text}
 """
     try:
         resp = bedrock_client.invoke_model(
@@ -144,12 +160,13 @@ def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str) -> Di
         lob = 'WC'
 
     prompt = f"""
-Extract structured fields from the sheet text for LoB={lob}.
+Extract structured fields from the content for LoB={lob}.
 Return STRICT JSON ONLY matching this schema:
 {schema}
 Rules: ISO dates if possible; keep amounts/strings as-is; empty string if missing; preserve row order.
+IMPORTANT: Extract the carrier/company name from the content. This is critical.
 
-Sheet text:\n{text}
+Content:\n{text}
 """
     try:
         resp = bedrock_client.invoke_model(
@@ -200,8 +217,9 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
 
 
 def main():
-    p = argparse.ArgumentParser(description="LLM-based LoB extractor for multi-sheet Excel")
+    p = argparse.ArgumentParser(description="LLM-based LoB extractor for multi-sheet Excel + optional PDF")
     p.add_argument("excel_path", help="Input Excel (.xlsx)")
+    p.add_argument("--pdf", help="Optional companion PDF for additional text context")
     p.add_argument("--config", default="config.py", help="Path to config.py")
     p.add_argument("--out", dest="out_dir", default="excel_llm_results", help="Output directory")
     args = p.parse_args()
@@ -215,7 +233,16 @@ def main():
 
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Read Excel
     xls = pd.ExcelFile(args.excel_path)
+    excel_text_parts = []
+
+    # Read optional PDF using fitz for robust text extraction
+    pdf_text = ""
+    if args.pdf and Path(args.pdf).exists():
+        pdf_text = _extract_text_fitz(args.pdf)
+        print(f"📄 Extracted {len(pdf_text)} chars from PDF using fitz")
+        excel_text_parts.append(f"PDF_CONTEXT:\n{pdf_text}")
 
     auto_rows: List[Dict] = []
     gl_rows: List[Dict] = []
@@ -224,14 +251,28 @@ def main():
     for sheet in xls.sheet_names:
         df = xls.parse(sheet)
         sheet_text = _sheet_to_text(df, sheet)
-        lob = classify_lob(bedrock, cfg['model_id'], sheet_text)
-        fields = extract_fields_llm(bedrock, cfg['model_id'], sheet_text, lob)
+        
+        # Combine Excel sheet + PDF context for better carrier detection
+        combined_text = "\n\n".join(excel_text_parts + [sheet_text])
+        
+        lob = classify_lob(bedrock, cfg['model_id'], combined_text)
+        fields = extract_fields_llm(bedrock, cfg['model_id'], combined_text, lob)
+        
+        # Ensure carrier is extracted - try multiple sources
+        carrier = fields.get('carrier', '')
+        if not carrier:
+            carrier = _extract_carrier_from_text(combined_text)
+        if not carrier:
+            # Try from sheet data
+            carrier = _extract_carrier_from_text(sheet_text)
+        
+        print(f"📊 Sheet '{sheet}': LoB={lob}, Carrier='{carrier}'")
 
         if lob == 'AUTO':
             for c in fields.get('claims', []):
                 auto_rows.append({
                     'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or fields.get('carrier',''),
+                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
                     'claim_number': c.get('claim_number',''),
                     'loss_date': c.get('loss_date',''),
                     'paid_loss': c.get('paid_loss',''),
@@ -242,7 +283,7 @@ def main():
             for c in fields.get('claims', []):
                 gl_rows.append({
                     'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or fields.get('carrier',''),
+                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
                     'claim_number': c.get('claim_number',''),
                     'loss_date': c.get('loss_date',''),
                     'bi_paid_loss': c.get('bi_paid_loss',''),
@@ -255,7 +296,7 @@ def main():
             for c in fields.get('claims', []):
                 wc_rows.append({
                     'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or fields.get('carrier',''),
+                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
                     'claim_number': c.get('claim_number',''),
                     'loss_date': c.get('loss_date',''),
                     'bi_paid_loss': c.get('bi_paid_loss',''),
