@@ -98,9 +98,22 @@ Content:\n{text}
             lob = (obj.get('lob') or '').strip().upper()
             if lob in {"AUTO","GENERAL LIABILITY","WC"}:
                 return lob
-    except Exception as e:
-        print(f"⚠️ LOB classification failed: {e}")
-    return "AUTO"  # default fallback
+    except Exception:
+        pass
+    # Heuristic fallback on source text
+    t = text.upper()
+    scores = {"AUTO":0, "GENERAL LIABILITY":0, "WC":0}
+    auto_hits = [" AUTO ", " AUTOMOBILE", " VEHICLE", " VIN ", " COLLISION", " COMPREHENSIVE", " LICENSE PLATE", " TOW ", " RENTAL", " SUBROGATION"]
+    gl_hits = [" GENERAL LIABILITY", " GL ", " PREMISES", " PRODUCTS LIABILITY", " CGL ", " COVERAGE A", " COVERAGE B", " COVERAGE C", " AGGREGATE LIMIT"]
+    wc_hits = [" WORKERS' COMP", " WORKERS COMP", " WC ", " TTD", " TPD", " INDEMNITY", " MEDICAL ONLY", " LOST TIME", " OSHA ", " EMPLOYEE ", " EMPLOYER "]
+    for k in auto_hits:
+        if k in t: scores["AUTO"] += 1
+    for k in gl_hits:
+        if k in t: scores["GENERAL LIABILITY"] += 1
+    for k in wc_hits:
+        if k in t: scores["WC"] += 1
+    best = max(scores, key=lambda x: scores[x])
+    return best if scores[best] > 0 else "AUTO"
 
 
 def classify_lobs_multi(bedrock_client, model_id: str, text: str) -> List[str]:
@@ -142,8 +155,19 @@ Content:\n{text}
                         cleaned.append(s)
                 if cleaned:
                     return cleaned
-    except Exception as e:
-        print(f"⚠️ Multi-LOB classification failed: {e}")
+    except Exception:
+        pass
+    # Heuristic fallback on source text
+    t = text.upper()
+    found = []
+    if any(k in t for k in [" AUTO ", " AUTOMOBILE", " VEHICLE", " VIN ", " COLLISION", " COMPREHENSIVE", " LICENSE PLATE", " TOW ", " RENTAL", " SUBROGATION"]):
+        found.append("AUTO")
+    if any(k in t for k in [" GENERAL LIABILITY", " GL ", " PREMISES", " PRODUCTS LIABILITY", " CGL ", " COVERAGE A", " COVERAGE B", " COVERAGE C", " AGGREGATE LIMIT"]):
+        found.append("GENERAL LIABILITY")
+    if any(k in t for k in [" WORKERS' COMP", " WORKERS COMP", " WC ", " TTD", " TPD", " INDEMNITY", " MEDICAL ONLY", " LOST TIME", " OSHA ", " EMPLOYEE ", " EMPLOYER "]):
+        found.append("WC")
+    if found:
+        return found
     # Fallback to single classifier
     single = classify_lob(bedrock_client, model_id, text)
     return [single] if single else ["AUTO"]
@@ -283,7 +307,8 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
     """Process a single text file and return a list of extracted results per detected LoB"""
     results: List[Dict] = []
     try:
-        with open(text_file_path, 'r', encoding='utf-8') as f:
+        import traceback
+        with open(text_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text_content = f.read()
         
         print(f"📄 Processing text file: {text_file_path} ({len(text_content)} chars)")
@@ -311,7 +336,9 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
             })
         
     except Exception as e:
+        import traceback
         print(f"❌ Error processing {text_file_path}: {e}")
+        print(traceback.format_exc())
     return results
 
 
