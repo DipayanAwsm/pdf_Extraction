@@ -67,9 +67,16 @@ def _extract_carrier_from_text(text: str) -> str:
 
 def classify_lob(bedrock_client, model_id: str, text: str) -> str:
     prompt = f"""
-You are an insurance domain expert. Classify the following content into one line of business.
-Choose exactly one of: AUTO, GENERAL LIABILITY, WC
-Return strict JSON only: {{"lob": "AUTO|GENERAL LIABILITY|WC"}}
+You are an insurance domain expert. Determine the Line of Business (LoB) present in the content.
+You MUST choose exactly one of these values: AUTO, GENERAL LIABILITY, WC.
+
+Decision rules and strong signals:
+- AUTO: mentions like Auto, Automobile, vehicle, VIN, Bodily Injury/Property Damage split for auto claims, collision, comprehensive, adjuster notes about drivers, policy for auto, traffic accident, liability/PD/BI typical for auto, claimant driver/passenger, license plate, total loss, rental car, tow, subrogation with other driver.
+- GENERAL LIABILITY: mentions like General Liability, GL, premises liability, slip and fall, products liability, CGL, occurrence/aggregate limits typical to GL, third-party bodily injury/property damage at premises, insured as a business entity, coverage parts: Coverage A/B/C.
+- WC: mentions like Workers' Compensation, WC, work comp, employee injury, TTD/TPD, indemnity, medical only, lost time, OSHA, employer, adjuster notes for claimant as employee, wage statements.
+
+Return STRICT JSON ONLY with no commentary: {"lob": "AUTO" | "GENERAL LIABILITY" | "WC"}
+If uncertain, pick the most probable, but NEVER return empty.
 
 Content:\n{text}
 """
@@ -78,7 +85,7 @@ Content:\n{text}
             modelId=model_id,
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 100,
+                "max_tokens": 300,
                 "temperature": 0.0,
                 "messages": [{"role": "user", "content": prompt}],
             })
@@ -94,6 +101,52 @@ Content:\n{text}
     except Exception as e:
         print(f"⚠️ LOB classification failed: {e}")
     return "AUTO"  # default fallback
+
+
+def classify_lobs_multi(bedrock_client, model_id: str, text: str) -> List[str]:
+    prompt = f"""
+You are an insurance domain expert. Determine ALL Lines of Business (LoBs) present in the content.
+Choose any that apply from exactly these values: AUTO, GENERAL LIABILITY, WC.
+
+Decision rules and strong signals:
+- AUTO: Auto/Automobile/vehicle, VIN, collision/comprehensive, driver/passenger, license plate, rental, tow, subrogation with other driver, BI/PD typical to auto.
+- GENERAL LIABILITY: General Liability/GL, premises/products liability, CGL, Coverage A/B/C, occurrence/aggregate limits, third-party injury/damage at premises.
+- WC: Workers' Compensation/WC, employee injury, TTD/TPD, indemnity, medical only, lost time, OSHA, wage statements, employer/employee terminology.
+
+Return STRICT JSON ONLY with no commentary: {"lobs": ["AUTO" | "GENERAL LIABILITY" | "WC", ...]}
+If uncertain, include the most probable, but NEVER return an empty list.
+
+Content:\n{text}
+"""
+    try:
+        resp = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 400,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+        )
+        body = json.loads(resp['body'].read())
+        content = body['content'][0]['text']
+        start = content.find('{'); end = content.rfind('}') + 1
+        if start != -1 and end > start:
+            obj = json.loads(content[start:end])
+            lobs = obj.get('lobs') or []
+            if isinstance(lobs, list):
+                cleaned = []
+                for v in lobs:
+                    s = str(v).strip().upper()
+                    if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in cleaned:
+                        cleaned.append(s)
+                if cleaned:
+                    return cleaned
+    except Exception as e:
+        print(f"⚠️ Multi-LOB classification failed: {e}")
+    # Fallback to single classifier
+    single = classify_lob(bedrock_client, model_id, text)
+    return [single] if single else ["AUTO"]
 
 
 def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str) -> Dict:
@@ -201,37 +254,40 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
             per_lob['WC'].to_excel(w, sheet_name='wc_claims', index=False)
 
 
-def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Dict:
-    """Process a single text file and return extracted data"""
+def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> List[Dict]:
+    """Process a single text file and return a list of extracted results per detected LoB"""
+    results: List[Dict] = []
     try:
         with open(text_file_path, 'r', encoding='utf-8') as f:
             text_content = f.read()
         
         print(f"📄 Processing text file: {text_file_path} ({len(text_content)} chars)")
         
-        # Classify LoB
-        lob = classify_lob(bedrock_client, model_id, text_content)
+        # Classify all LoBs present
+        lobs = classify_lobs_multi(bedrock_client, model_id, text_content)
+        print(f"🔎 Detected LoBs: {lobs}")
         
-        # Extract fields using LLM
-        fields = extract_fields_llm(bedrock_client, model_id, text_content, lob)
-        
-        # Ensure carrier is extracted - try multiple sources
-        carrier = fields.get('carrier', '')
-        if not carrier:
-            carrier = _extract_carrier_from_text(text_content)
-        
-        print(f"📊 File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
-        
-        return {
-            'lob': lob,
-            'carrier': carrier,
-            'fields': fields,
-            'source_file': text_file_path
-        }
+        for lob in lobs:
+            # Extract fields using LLM for this LoB only
+            fields = extract_fields_llm(bedrock_client, model_id, text_content, lob)
+            
+            # Ensure carrier is extracted - try multiple sources
+            carrier = fields.get('carrier', '')
+            if not carrier:
+                carrier = _extract_carrier_from_text(text_content)
+            
+            print(f"📊 File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
+            
+            results.append({
+                'lob': lob,
+                'carrier': carrier,
+                'fields': fields,
+                'source_file': text_file_path
+            })
         
     except Exception as e:
         print(f"❌ Error processing {text_file_path}: {e}")
-        return None
+    return results
 
 
 def main():
@@ -272,58 +328,59 @@ def main():
 
     # Process each text file
     for text_file in text_files:
-        result = process_text_file(str(text_file), bedrock, cfg['model_id'])
-        if not result:
+        results = process_text_file(str(text_file), bedrock, cfg['model_id'])
+        if not results:
             continue
             
-        lob = result['lob']
-        carrier = result['carrier']
-        fields = result['fields']
-        source_file = result['source_file']
+        for result in results:
+            lob = result['lob']
+            carrier = result['carrier']
+            fields = result['fields']
+            source_file = result['source_file']
 
-        if lob == 'AUTO':
-            for c in fields.get('claims', []):
-                auto_rows.append({
-                    'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
-                    'claim_number': c.get('claim_number',''),
-                    'loss_date': c.get('loss_date',''),
-                    'paid_loss': c.get('paid_loss',''),
-                    'reserve': c.get('reserve',''),
-                    'alae': c.get('alae',''),
-                    'source_file': source_file
-                })
-        elif lob in ('GENERAL LIABILITY','GL'):
-            for c in fields.get('claims', []):
-                gl_rows.append({
-                    'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
-                    'claim_number': c.get('claim_number',''),
-                    'loss_date': c.get('loss_date',''),
-                    'bi_paid_loss': c.get('bi_paid_loss',''),
-                    'pd_paid_loss': c.get('pd_paid_loss',''),
-                    'bi_reserve': c.get('bi_reserve',''),
-                    'pd_reserve': c.get('pd_reserve',''),
-                    'alae': c.get('alae',''),
-                    'source_file': source_file
-                })
-        elif lob == 'WC':
-            for c in fields.get('claims', []):
-                wc_rows.append({
-                    'evaluation_date': fields.get('evaluation_date',''),
-                    'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
-                    'claim_number': c.get('claim_number',''),
-                    'loss_date': c.get('loss_date',''),
-                    'bi_paid_loss': c.get('bi_paid_loss',''),
-                    'pd_paid_loss': c.get('pd_paid_loss',''),
-                    'bi_reserve': c.get('bi_reserve',''),
-                    'pd_reserve': c.get('pd_reserve',''),
-                    'alae': c.get('alae',''),
-                    'source_file': source_file
-                })
-        else:
-            # Unknown LOB from model, skip
-            continue
+            if lob == 'AUTO':
+                for c in fields.get('claims', []):
+                    auto_rows.append({
+                        'evaluation_date': fields.get('evaluation_date',''),
+                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'claim_number': c.get('claim_number',''),
+                        'loss_date': c.get('loss_date',''),
+                        'paid_loss': c.get('paid_loss',''),
+                        'reserve': c.get('reserve',''),
+                        'alae': c.get('alae',''),
+                        'source_file': source_file
+                    })
+            elif lob in ('GENERAL LIABILITY','GL'):
+                for c in fields.get('claims', []):
+                    gl_rows.append({
+                        'evaluation_date': fields.get('evaluation_date',''),
+                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'claim_number': c.get('claim_number',''),
+                        'loss_date': c.get('loss_date',''),
+                        'bi_paid_loss': c.get('bi_paid_loss',''),
+                        'pd_paid_loss': c.get('pd_paid_loss',''),
+                        'bi_reserve': c.get('bi_reserve',''),
+                        'pd_reserve': c.get('pd_reserve',''),
+                        'alae': c.get('alae',''),
+                        'source_file': source_file
+                    })
+            elif lob == 'WC':
+                for c in fields.get('claims', []):
+                    wc_rows.append({
+                        'evaluation_date': fields.get('evaluation_date',''),
+                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'claim_number': c.get('claim_number',''),
+                        'loss_date': c.get('loss_date',''),
+                        'bi_paid_loss': c.get('bi_paid_loss',''),
+                        'pd_paid_loss': c.get('pd_paid_loss',''),
+                        'bi_reserve': c.get('bi_reserve',''),
+                        'pd_reserve': c.get('pd_reserve',''),
+                        'alae': c.get('alae',''),
+                        'source_file': source_file
+                    })
+            else:
+                # Unknown LOB from model, skip
+                continue
 
     # Create DataFrames
     per_lob = {}
