@@ -231,27 +231,52 @@ Content:\n{text}
 
 
 def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
-    # Per-LoB files
-    if 'AUTO' in per_lob and not per_lob['AUTO'].empty:
-        d = out_dir / 'auto'; d.mkdir(parents=True, exist_ok=True)
-        with pd.ExcelWriter(d / 'AUTO_consolidated.xlsx', engine='openpyxl') as w:
-            per_lob['AUTO'].to_excel(w, sheet_name='auto_claims', index=False)
-    if 'GL' in per_lob and not per_lob['GL'].empty:
-        d = out_dir / 'GL'; d.mkdir(parents=True, exist_ok=True)
-        with pd.ExcelWriter(d / 'GL_consolidated.xlsx', engine='openpyxl') as w:
-            per_lob['GL'].to_excel(w, sheet_name='gl_claims', index=False)
-    if 'WC' in per_lob and not per_lob['WC'].empty:
-        d = out_dir / 'WC'; d.mkdir(parents=True, exist_ok=True)
-        with pd.ExcelWriter(d / 'WC_consolidated.xlsx', engine='openpyxl') as w:
-            per_lob['WC'].to_excel(w, sheet_name='wc_claims', index=False)
-    # Combined
-    with pd.ExcelWriter(out_dir / 'result.xlsx', engine='openpyxl') as w:
-        if 'AUTO' in per_lob and not per_lob['AUTO'].empty:
-            per_lob['AUTO'].to_excel(w, sheet_name='auto_claims', index=False)
-        if 'GL' in per_lob and not per_lob['GL'].empty:
-            per_lob['GL'].to_excel(w, sheet_name='gl_claims', index=False)
-        if 'WC' in per_lob and not per_lob['WC'].empty:
-            per_lob['WC'].to_excel(w, sheet_name='wc_claims', index=False)
+    # Determine which LoBs have data
+    auto_df = per_lob.get('AUTO')
+    gl_df = per_lob.get('GL')
+    wc_df = per_lob.get('WC')
+
+    has_auto = auto_df is not None and not auto_df.empty
+    has_gl = gl_df is not None and not gl_df.empty
+    has_wc = wc_df is not None and not wc_df.empty
+
+    # Per-LoB files (only if data exists)
+    if has_auto:
+        try:
+            d = out_dir / 'auto'; d.mkdir(parents=True, exist_ok=True)
+            with pd.ExcelWriter(d / 'AUTO_consolidated.xlsx', engine='openpyxl') as w:
+                auto_df.to_excel(w, sheet_name='auto_claims', index=False)
+        except Exception as e:
+            print(f"⚠️ Failed writing AUTO output: {e}")
+    if has_gl:
+        try:
+            d = out_dir / 'GL'; d.mkdir(parents=True, exist_ok=True)
+            with pd.ExcelWriter(d / 'GL_consolidated.xlsx', engine='openpyxl') as w:
+                gl_df.to_excel(w, sheet_name='gl_claims', index=False)
+        except Exception as e:
+            print(f"⚠️ Failed writing GL output: {e}")
+    if has_wc:
+        try:
+            d = out_dir / 'WC'; d.mkdir(parents=True, exist_ok=True)
+            with pd.ExcelWriter(d / 'WC_consolidated.xlsx', engine='openpyxl') as w:
+                wc_df.to_excel(w, sheet_name='wc_claims', index=False)
+        except Exception as e:
+            print(f"⚠️ Failed writing WC output: {e}")
+
+    # Combined (only if any data exists)
+    if has_auto or has_gl or has_wc:
+        try:
+            with pd.ExcelWriter(out_dir / 'result.xlsx', engine='openpyxl') as w:
+                if has_auto:
+                    auto_df.to_excel(w, sheet_name='auto_claims', index=False)
+                if has_gl:
+                    gl_df.to_excel(w, sheet_name='gl_claims', index=False)
+                if has_wc:
+                    wc_df.to_excel(w, sheet_name='wc_claims', index=False)
+        except Exception as e:
+            print(f"⚠️ Failed writing combined result.xlsx: {e}")
+    else:
+        print("ℹ️ No data found for any LoB. Skipping result.xlsx creation.")
 
 
 def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> List[Dict]:
