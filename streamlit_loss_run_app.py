@@ -97,19 +97,23 @@ def save_uploaded_file(uploaded_file, upload_dir):
 def run_processing_script(input_file, output_dir):
     """Run the processing script and return status"""
     try:
-        # Create a batch/shell script call
-        # This will call our text_lob_llm_extractor.py script
-        script_path = "text_lob_llm_extractor.py"
-        config_path = "config.py"
+        # Check if config.py exists
+        config_path = Path("config.py")
+        if not config_path.exists():
+            return False, "", "config.py file not found. Please ensure AWS credentials are configured."
         
-        # Convert PDF to text first (you might want to use fitz here)
-        # For now, we'll assume the PDF is already converted to text
-        # In a real scenario, you'd add PDF to text conversion here
+        # Convert PDF to text first using fitz
+        text_file = convert_pdf_to_text(input_file, output_dir)
+        if not text_file:
+            return False, "", "Failed to convert PDF to text"
+        
+        # Run the text processing script
+        script_path = "text_lob_llm_extractor.py"
         
         cmd = [
             "python", script_path,
-            str(input_file),
-            "--config", config_path,
+            str(text_file),
+            "--config", str(config_path),
             "--out", str(output_dir)
         ]
         
@@ -126,6 +130,42 @@ def run_processing_script(input_file, output_dir):
         return False, "", "Processing timed out after 5 minutes"
     except Exception as e:
         return False, "", str(e)
+
+
+def convert_pdf_to_text(pdf_file, output_dir):
+    """Convert PDF to text using fitz (PyMuPDF)"""
+    try:
+        import fitz
+        from pathlib import Path
+        
+        # Create output directory if it doesn't exist
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True)
+        
+        # Open PDF
+        doc = fitz.open(pdf_file)
+        text_content = ''
+        
+        # Extract text from all pages
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            text_content += page.get_text()
+            text_content += '\n\n--- PAGE BREAK ---\n\n'
+        
+        doc.close()
+        
+        # Save text file
+        pdf_name = Path(pdf_file).stem
+        text_file_path = output_dir / f"{pdf_name}_extracted.txt"
+        
+        with open(text_file_path, 'w', encoding='utf-8') as f:
+            f.write(text_content)
+        
+        return text_file_path
+        
+    except Exception as e:
+        st.error(f"Error converting PDF to text: {str(e)}")
+        return None
 
 
 def find_output_files(output_dir):
@@ -197,6 +237,7 @@ def main():
             steps = [
                 "Initializing processing...",
                 "Converting PDF to text...",
+                "Loading AWS configuration...",
                 "Classifying Line of Business...",
                 "Extracting claim data...",
                 "Normalizing data...",
@@ -213,6 +254,11 @@ def main():
                 # Run actual processing
                 status_text.text("Running processing script...")
                 success, stdout, stderr = run_processing_script(file_path, output_dir)
+                
+                # Show processing output if available
+                if stdout:
+                    with st.expander("Processing Output", expanded=False):
+                        st.text(stdout)
                 
                 if success:
                     progress_bar.progress(1.0)
