@@ -75,7 +75,7 @@ Decision rules and strong signals:
 - GENERAL LIABILITY: mentions like General Liability, GL, premises liability, slip and fall, products liability, CGL, occurrence/aggregate limits typical to GL, third-party bodily injury/property damage at premises, insured as a business entity, coverage parts: Coverage A/B/C.
 - WC: mentions like Workers' Compensation, WC, work comp, employee injury, TTD/TPD, indemnity, medical only, lost time, OSHA, employer, adjuster notes for claimant as employee, wage statements.
 
-Return STRICT JSON ONLY with no commentary: {"lob": "AUTO" | "GENERAL LIABILITY" | "WC"}
+Return STRICT JSON ONLY with no commentary: {{"lob": "AUTO" | "GENERAL LIABILITY" | "WC"}}
 If uncertain, pick the most probable, but NEVER return empty.
 
 Content:\n{text}
@@ -126,7 +126,7 @@ Decision rules and strong signals:
 - GENERAL LIABILITY: General Liability/GL, premises/products liability, CGL, Coverage A/B/C, occurrence/aggregate limits, third-party injury/damage at premises.
 - WC: Workers' Compensation/WC, employee injury, TTD/TPD, indemnity, medical only, lost time, OSHA, wage statements, employer/employee terminology.
 
-Return STRICT JSON ONLY with no commentary: {"lobs": ["AUTO" | "GENERAL LIABILITY" | "WC", ...]}
+Return STRICT JSON ONLY with no commentary: {{"lobs": ["AUTO" | "GENERAL LIABILITY" | "WC", ...]}}
 If uncertain, include the most probable, but NEVER return an empty list.
 
 Content:\n{text}
