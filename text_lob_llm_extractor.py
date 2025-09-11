@@ -65,6 +65,32 @@ def _extract_carrier_from_text(text: str) -> str:
     return ""
 
 
+def _extract_carrier_from_filename(file_path: str) -> str:
+    """Attempt to infer carrier from the text file name (stem)."""
+    import re
+    p = Path(file_path)
+    stem = p.stem.replace('_', ' ').replace('-', ' ').replace('.', ' ')
+    # Try common corporate suffix pattern
+    m = re.search(r"\b([A-Z][A-Za-z0-9 &'.\-/]+(?:Insurance|Ins|Corp|Corporation|Company|Co|LLC|Inc))\b", stem, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Try grabbing leading words before typical descriptors
+    tokens = stem.split()
+    if tokens:
+        # Heuristic: up to first 3 tokens if they look like a name and not generic words
+        stop_words = {"loss", "run", "report", "claims", "claim", "extract", "extracted", "output", "input", "file"}
+        name_parts = []
+        for t in tokens:
+            if t.lower() in stop_words:
+                break
+            name_parts.append(t)
+            if len(name_parts) >= 3:
+                break
+        if name_parts:
+            return ' '.join(name_parts)
+    return ""
+
+
 def classify_lob(bedrock_client, model_id: str, text: str) -> str:
     prompt = f"""
 You are an insurance domain expert. Determine the Line of Business (LoB) present in the content.
@@ -467,6 +493,8 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
             carrier = fields.get('carrier', '')
             if not carrier:
                 carrier = _extract_carrier_from_text(text_content)
+            if not carrier:
+                carrier = _extract_carrier_from_filename(text_file_path)
             
             print(f"📊 File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
             
