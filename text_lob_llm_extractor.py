@@ -211,14 +211,14 @@ def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str) -> Di
             "claims": [{
                 "claim_number": "string",
                 "loss_date": "string",
-                "bi_paid_loss": "string",
-                "pd_paid_loss": "string",
-                "bi_reserve": "string",
-                "pd_reserve": "string",
-                "alae": "string"
+                "Indemnity_paid_loss": "string",
+                "Medical_paid_loss": "string",
+                "Indemnity_reserve": "string",
+                "Medical_reserve": "string",
+                "ALAE": "string"
             }]
         }
-        guidance = "For WC: evaluation_date, carrier, bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae."
+        guidance = "For WC: evaluation_date, carrier, Indemnity_paid_loss, Medical_paid_loss, Indemnity_reserve, Medical_reserve, ALAE."
         lob = 'WC'
 
     prompt = f"""
@@ -252,6 +252,148 @@ Content:\n{text}
     except Exception as e:
         print(f"⚠️ LLM extraction failed: {e}")
     return {"evaluation_date":"","carrier":"","claims": []}
+
+
+def _chunk_text_for_llm(text: str, max_chars: int = 15000) -> List[str]:
+    chunks: List[str] = []
+    if not text:
+        return chunks
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        # try to cut on a newline for better segmentation
+        if end < n:
+            nl = text.rfind("\n", start, end)
+            if nl != -1 and nl > start + 1000:
+                end = nl
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str) -> Dict:
+    """Run extract_fields_llm on chunks and merge results to avoid truncation issues."""
+    chunks = _chunk_text_for_llm(text)
+    if not chunks:
+        chunks = [text]
+    merged = {"evaluation_date": "", "carrier": "", "claims": []}
+    for idx, part in enumerate(chunks):
+        result = extract_fields_llm(bedrock_client, model_id, part, lob)
+        if result.get('evaluation_date') and not merged['evaluation_date']:
+            merged['evaluation_date'] = result.get('evaluation_date','')
+        if result.get('carrier') and not merged['carrier']:
+            merged['carrier'] = result.get('carrier','')
+        if isinstance(result.get('claims'), list):
+            merged['claims'].extend(result['claims'])
+    return merged
+
+
+def _parse_money(value: str) -> str:
+    import re
+    if value is None:
+        return ""
+    s = str(value)
+    # keep as string but strip extraneous chars while preserving decimals and commas
+    m = re.findall(r"[-$]?\d{1,3}(?:,\d{3})*(?:\.\d+)?|[-$]?\d+(?:\.\d+)?", s)
+    return m[0] if m else s.strip()
+
+
+def heuristic_extract_wc(text: str) -> Dict:
+    """Heuristic fallback for WC: attempts to parse tabular-ish lines for required fields."""
+    import re
+    claims = []
+    evaluation_date = ""
+    carrier = ""
+
+    # try to find carrier
+    carrier = _extract_carrier_from_text(text) or ""
+
+    # possible evaluation date patterns
+    date_patterns = [
+        r"Evaluation\s*Date\s*[:\-]\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})",
+        r"As\s*of\s*Date\s*[:\-]\s*([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})",
+    ]
+    for pat in date_patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            evaluation_date = m.group(1).strip()
+            break
+
+    # Row pattern attempts: Claim Number, Loss date, BI Paid, PD Paid, BI Reserve, PD Reserve, ALAE
+    # We'll search lines and try to map by keywords present
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    header_map = {
+        'claim': ['claim number','claim no','claim #','claim id'],
+        'loss_date': ['loss date','date of loss','accident date'],
+        'indemnity_paid': ['indemnity paid', 'indemnity paid loss', 'ind paid'],
+        'medical_paid': ['medical paid', 'medical paid loss', 'med paid'],
+        'indemnity_reserve': ['indemnity reserve', 'ind reserve'],
+        'medical_reserve': ['medical reserve', 'med reserve'],
+        'alae': ['alae','allocated loss adjustment expense','expense']
+    }
+
+    def match_col(name: str, token: str) -> bool:
+        t = token.lower()
+        for key in header_map[name]:
+            if key in t:
+                return True
+        return False
+
+    # Try to detect header then parse following rows split by delimiters
+    header_idx = -1
+    for i, ln in enumerate(lines):
+        # a header line is one that contains at least two of the known columns
+        lower = ln.lower()
+        hits = 0
+        for keys in header_map.values():
+            if any(k in lower for k in keys):
+                hits += 1
+        if hits >= 2:
+            header_idx = i
+            break
+
+    if header_idx != -1:
+        # parse rows after header using common delimiters
+        for ln in lines[header_idx+1:]:
+            parts = [p.strip() for p in re.split(r"\s{2,}|\t|\|", ln) if p.strip()]
+            if len(parts) < 3:
+                continue
+            row = {
+                'claim_number': '',
+                'loss_date': '',
+                'Indemnity_paid_loss': '',
+                'Medical_paid_loss': '',
+                'Indemnity_reserve': '',
+                'Medical_reserve': '',
+                'ALAE': '',
+            }
+            # greedy assign based on token clues
+            for p in parts:
+                pl = p.lower()
+                if not row['claim_number'] and re.search(r"\b\d{5,}\b|[A-Za-z]\d{4,}", p):
+                    row['claim_number'] = p
+                elif not row['loss_date'] and re.search(r"\b\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4}\b", p):
+                    row['loss_date'] = p
+                elif any(k in pl for k in header_map['indemnity_paid']) or 'indemnity' in pl:
+                    row['Indemnity_paid_loss'] = _parse_money(p)
+                elif any(k in pl for k in header_map['medical_paid']) or 'medical' in pl:
+                    row['Medical_paid_loss'] = _parse_money(p)
+                elif any(k in pl for k in header_map['indemnity_reserve']):
+                    row['Indemnity_reserve'] = _parse_money(p)
+                elif any(k in pl for k in header_map['medical_reserve']):
+                    row['Medical_reserve'] = _parse_money(p)
+                elif 'alae' in pl or any(k in pl for k in header_map['alae']):
+                    row['ALAE'] = _parse_money(p)
+            # consider valid if we got at least claim_number
+            if row['claim_number']:
+                claims.append(row)
+
+    return {
+        'evaluation_date': evaluation_date,
+        'carrier': carrier,
+        'claims': claims
+    }
 
 
 def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
@@ -319,7 +461,7 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
         
         for lob in lobs:
             # Extract fields using LLM for this LoB only
-            fields = extract_fields_llm(bedrock_client, model_id, text_content, lob)
+            fields = extract_fields_llm_chunked(bedrock_client, model_id, text_content, lob)
             
             # Ensure carrier is extracted - try multiple sources
             carrier = fields.get('carrier', '')
@@ -387,8 +529,18 @@ def main():
         for result in results:
             lob = result['lob']
             carrier = result['carrier']
-            fields = result['fields']
             source_file = result['source_file']
+
+            # Use chunked LLM extraction to avoid truncation
+            fields = extract_fields_llm_chunked(bedrock, cfg['model_id'], open(source_file, 'r', encoding='utf-8', errors='ignore').read(), lob)
+
+            # Fallback: for WC, if no claims extracted, try heuristic parsing
+            if lob == 'WC' and (not fields.get('claims')):
+                heuristic = heuristic_extract_wc(open(source_file, 'r', encoding='utf-8', errors='ignore').read())
+                # keep evaluation_date/carrier if LLM missed
+                fields['evaluation_date'] = fields.get('evaluation_date') or heuristic.get('evaluation_date','')
+                fields['carrier'] = fields.get('carrier') or heuristic.get('carrier','')
+                fields['claims'] = heuristic.get('claims', [])
 
             if lob == 'AUTO':
                 for c in fields.get('claims', []):
@@ -423,11 +575,11 @@ def main():
                         'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
                         'claim_number': c.get('claim_number',''),
                         'loss_date': c.get('loss_date',''),
-                        'bi_paid_loss': c.get('bi_paid_loss',''),
-                        'pd_paid_loss': c.get('pd_paid_loss',''),
-                        'bi_reserve': c.get('bi_reserve',''),
-                        'pd_reserve': c.get('pd_reserve',''),
-                        'alae': c.get('alae',''),
+                        'Indemnity_paid_loss': c.get('Indemnity_paid_loss',''),
+                        'Medical_paid_loss': c.get('Medical_paid_loss',''),
+                        'Indemnity_reserve': c.get('Indemnity_reserve',''),
+                        'Medical_reserve': c.get('Medical_reserve',''),
+                        'ALAE': c.get('ALAE',''),
                         'source_file': source_file
                     })
             else:
@@ -445,7 +597,7 @@ def main():
     else:
         per_lob['GL'] = pd.DataFrame()
     if wc_rows:
-        per_lob['WC'] = pd.DataFrame(wc_rows, columns=['evaluation_date','carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae','source_file'])
+        per_lob['WC'] = pd.DataFrame(wc_rows, columns=['evaluation_date','carrier','claim_number','loss_date','Indemnity_paid_loss','Medical_paid_loss','Indemnity_reserve','Medical_reserve','ALAE','source_file'])
     else:
         per_lob['WC'] = pd.DataFrame()
 
