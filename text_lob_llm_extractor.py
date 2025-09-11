@@ -513,7 +513,7 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
 
 
 def main():
-    p = argparse.ArgumentParser(description="LLM-based LoB extractor for text files (extracted using fitz)")
+    p = argparse.ArgumentParser(description="LLM-based LoB extractor for text files (extracted using PyMuPDF/fitz)")
     p.add_argument("input_path", help="Input text file or directory containing text files")
     p.add_argument("--config", default="config.py", help="Path to config.py")
     p.add_argument("--out", dest="out_dir", default="text_llm_results", help="Output directory")
