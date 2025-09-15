@@ -12,7 +12,7 @@ import time
 def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
     config_path = Path(config_file)
     if not config_path.exists():
-        print(f"❌ Configuration file not found: {config_path}")
+        print(f"ERROR: Configuration file not found: {config_path}")
         return None
     try:
         import importlib.util
@@ -28,11 +28,11 @@ def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
         }
         missing = [k for k, v in cfg.items() if not v]
         if missing:
-            print(f"❌ Missing required config fields: {missing}")
+            print(f"ERROR: Missing required config fields: {missing}")
             return None
         return cfg
     except Exception as e:
-        print(f"❌ Error loading config: {e}")
+        print(f"ERROR: Error loading config: {e}")
         return None
 
 
@@ -46,7 +46,7 @@ def setup_bedrock_client(cfg: Dict[str, str]):
         )
         return session.client('bedrock-runtime')
     except Exception as e:
-        print(f"❌ Failed to setup Bedrock client: {e}")
+        print(f"ERROR: Failed to setup Bedrock client: {e}")
         return None
 
 
@@ -282,7 +282,7 @@ Content:\n{text}
                     return obj
         except Exception as e:
             if attempt == max_attempts:
-                print(f"⚠️ LLM extraction failed after retries: {e}")
+                print(f"WARNING: LLM extraction failed after retries: {e}")
                 break
             # Backoff
             time.sleep(delay_seconds)
@@ -456,21 +456,21 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
             with pd.ExcelWriter(d / 'AUTO_consolidated.xlsx', engine='openpyxl') as w:
                 auto_df.to_excel(w, sheet_name='auto_claims', index=False)
         except Exception as e:
-            print(f"⚠️ Failed writing AUTO output: {e}")
+            print(f"WARNING: Failed writing AUTO output: {e}")
     if has_gl:
         try:
             d = out_dir / 'GL'; d.mkdir(parents=True, exist_ok=True)
             with pd.ExcelWriter(d / 'GL_consolidated.xlsx', engine='openpyxl') as w:
                 gl_df.to_excel(w, sheet_name='gl_claims', index=False)
         except Exception as e:
-            print(f"⚠️ Failed writing GL output: {e}")
+            print(f"WARNING: Failed writing GL output: {e}")
     if has_wc:
         try:
             d = out_dir / 'WC'; d.mkdir(parents=True, exist_ok=True)
             with pd.ExcelWriter(d / 'WC_consolidated.xlsx', engine='openpyxl') as w:
                 wc_df.to_excel(w, sheet_name='wc_claims', index=False)
         except Exception as e:
-            print(f"⚠️ Failed writing WC output: {e}")
+            print(f"WARNING: Failed writing WC output: {e}")
 
     # Combined (only if any data exists)
     if has_auto or has_gl or has_wc:
@@ -483,7 +483,7 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
                 if has_wc:
                     wc_df.to_excel(w, sheet_name='wc_claims', index=False)
         except Exception as e:
-            print(f"⚠️ Failed writing combined result.xlsx: {e}")
+            print(f"WARNING: Failed writing combined result.xlsx: {e}")
     else:
         print("ℹ️ No data found for any LoB. Skipping result.xlsx creation.")
 
@@ -496,11 +496,11 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
         with open(text_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text_content = f.read()
         
-        print(f"📄 Processing text file: {text_file_path} ({len(text_content)} chars)")
+        print(f"Processing text file: {text_file_path} ({len(text_content)} chars)")
         
         # Classify all LoBs present
         lobs = classify_lobs_multi(bedrock_client, model_id, text_content)
-        print(f"🔎 Detected LoBs: {lobs}")
+        print(f"Detected LoBs: {lobs}")
         
         for lob in lobs:
             # Extract fields using LLM for this LoB only
@@ -513,7 +513,7 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
             if not carrier:
                 carrier = _extract_carrier_from_filename(text_file_path)
             
-            print(f"📊 File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
+            print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
             
             results.append({
                 'lob': lob,
@@ -524,7 +524,7 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> Lis
         
     except Exception as e:
         import traceback
-        print(f"❌ Error processing {text_file_path}: {e}")
+        print(f"ERROR: Error processing {text_file_path}: {e}")
         print(traceback.format_exc())
     return results
 
@@ -553,13 +553,13 @@ def main():
     elif input_path.is_dir():
         text_files = list(input_path.glob(args.pattern))
         if not text_files:
-            print(f"❌ No files found matching pattern '{args.pattern}' in {input_path}")
+            print(f"ERROR: No files found matching pattern '{args.pattern}' in {input_path}")
             return
     else:
-        print(f"❌ Input path does not exist: {input_path}")
+        print(f"ERROR: Input path does not exist: {input_path}")
         return
 
-    print(f"📁 Found {len(text_files)} text file(s) to process")
+    print(f"Found {len(text_files)} text file(s) to process")
 
     auto_rows: List[Dict] = []
     gl_rows: List[Dict] = []
@@ -650,7 +650,7 @@ def main():
     write_outputs(per_lob, out_dir)
     
     # Print summary
-    print(f"\n📊 Processing Summary:")
+    print(f"\nProcessing Summary:")
     print(f"   AUTO claims: {len(auto_rows)}")
     print(f"   GL claims: {len(gl_rows)}")
     print(f"   WC claims: {len(wc_rows)}")
