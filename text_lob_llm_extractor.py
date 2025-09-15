@@ -44,7 +44,7 @@ def setup_bedrock_client(cfg: Dict[str, str]):
             aws_session_token=cfg['session_token'],
             region_name=cfg['region']
         )
-        return session.client('bedrock-runtime')
+        return session.client('bedrock-runtime', verify=False)
     except Exception as e:
         print(f"ERROR: Failed to setup Bedrock client: {e}")
         return None
@@ -112,7 +112,7 @@ Content:\n{text}
             modelId=model_id,
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 300,
+                "max_tokens": 200000,
                 "temperature": 0.0,
                 "messages": [{"role": "user", "content": prompt}],
             })
@@ -163,7 +163,7 @@ Content:\n{text}
             modelId=model_id,
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 400,
+                "max_tokens": 200000,
                 "temperature": 0.0,
                 "messages": [{"role": "user", "content": prompt}],
             })
@@ -266,7 +266,7 @@ Content:\n{text}
                 modelId=model_id,
                 body=json.dumps({
                     "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 4000,
+                    "max_tokens": 200000,
                     "temperature": 0.0,
                     "messages": [{"role": "user", "content": prompt}],
                 })
