@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import boto3
+import time
 
 
 def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
@@ -256,31 +257,41 @@ IMPORTANT: Extract the carrier/company name from the content. This is critical.
 
 Content:\n{text}
 """
-    try:
-        resp = bedrock_client.invoke_model(
-            modelId=model_id,
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4000,
-                "temperature": 0.0,
-                "messages": [{"role": "user", "content": prompt}],
-            })
-        )
-        body = json.loads(resp['body'].read())
-        content = body['content'][0]['text']
-        start = content.find('{'); end = content.rfind('}') + 1
-        if start != -1 and end > start:
-            obj = json.loads(content[start:end])
-            if isinstance(obj, dict) and 'claims' in obj and isinstance(obj['claims'], list):
-                obj.setdefault('evaluation_date','')
-                obj.setdefault('carrier','')
-                return obj
-    except Exception as e:
-        print(f"⚠️ LLM extraction failed: {e}")
+    # Exponential backoff retries for robustness on long texts / throttling
+    max_attempts = 4
+    delay_seconds = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = bedrock_client.invoke_model(
+                modelId=model_id,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4000,
+                    "temperature": 0.0,
+                    "messages": [{"role": "user", "content": prompt}],
+                })
+            )
+            body = json.loads(resp['body'].read())
+            content = body['content'][0]['text']
+            start = content.find('{'); end = content.rfind('}') + 1
+            if start != -1 and end > start:
+                obj = json.loads(content[start:end])
+                if isinstance(obj, dict) and 'claims' in obj and isinstance(obj['claims'], list):
+                    obj.setdefault('evaluation_date','')
+                    obj.setdefault('carrier','')
+                    return obj
+        except Exception as e:
+            if attempt == max_attempts:
+                print(f"⚠️ LLM extraction failed after retries: {e}")
+                break
+            # Backoff
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
+            continue
     return {"evaluation_date":"","carrier":"","claims": []}
 
 
-def _chunk_text_for_llm(text: str, max_chars: int = 15000) -> List[str]:
+def _chunk_text_for_llm(text: str, max_chars: int = 15000, overlap_chars: int = 800) -> List[str]:
     chunks: List[str] = []
     if not text:
         return chunks
@@ -294,12 +305,15 @@ def _chunk_text_for_llm(text: str, max_chars: int = 15000) -> List[str]:
             if nl != -1 and nl > start + 1000:
                 end = nl
         chunks.append(text[start:end])
-        start = end
+        # advance with overlap (but not below current end)
+        if end >= n:
+            break
+        start = max(0, end - overlap_chars)
     return chunks
 
 
 def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str) -> Dict:
-    """Run extract_fields_llm on chunks and merge results to avoid truncation issues."""
+    """Run extract_fields_llm on overlapped chunks and merge results; duplicates are allowed."""
     chunks = _chunk_text_for_llm(text)
     if not chunks:
         chunks = [text]
@@ -311,7 +325,10 @@ def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: st
         if result.get('carrier') and not merged['carrier']:
             merged['carrier'] = result.get('carrier','')
         if isinstance(result.get('claims'), list):
+            # Keep duplicates as requested
             merged['claims'].extend(result['claims'])
+        # Gentle pacing to avoid throttling
+        time.sleep(0.5)
     return merged
 
 
