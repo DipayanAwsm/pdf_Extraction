@@ -23,3 +23,17 @@ API_DELAY = 1
 USE_CAMELOT = True
 CAMELOT_FLAVORS = ["lattice", "stream"]  # try both
 CAMELOT_PAGES = "all"
+
+# ==============================
+# OpenAI / Azure OpenAI settings
+# ==============================
+# For OpenAI
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+OPENAI_MODEL = "gpt-4o-2024-08-06"
+
+# For Azure OpenAI (if you use Azure endpoint)
+# If using Azure OpenAI, set USE_AZURE_OPENAI=True and fill the below
+USE_AZURE_OPENAI = False
+AZURE_OPENAI_ENDPOINT = "https://your-azure-openai-resource.openai.azure.com/"
+AZURE_OPENAI_API_KEY = "YOUR_AZURE_OPENAI_API_KEY"
+AZURE_OPENAI_DEPLOYMENT_NAME = "your-deployment-name"
