@@ -148,7 +148,7 @@ def save_to_backup(uploaded_file, backup_dir):
 
 
 def convert_pdf_to_text(pdf_path, tmp_dir):
-    """Convert PDF to text using fitzTest3.py"""
+    """Convert PDF to text using fitzTest3.py. Always return (path, error)."""
     try:
         cmd = ["python", "fitzTest3.py", str(pdf_path), "--output", str(tmp_dir)]
         
@@ -164,7 +164,13 @@ def convert_pdf_to_text(pdf_path, tmp_dir):
             output_lines = result.stdout.strip().split('\n')
             for line in output_lines:
                 if line.startswith("SUCCESS:"):
-                    return line.replace("SUCCESS:", "").strip()
+                    return line.replace("SUCCESS:", "").strip(), None
+            # If success but no marker, wait briefly and try to find file
+            time.sleep(0.5)
+            txts = list(Path(tmp_dir).glob("*_extracted.txt"))
+            if txts:
+                return str(txts[0]), None
+            return None, "Text file not found after conversion"
         
         return None, result.stderr
         
@@ -172,6 +178,26 @@ def convert_pdf_to_text(pdf_path, tmp_dir):
         return None, "PDF conversion timed out"
     except Exception as e:
         return None, str(e)
+
+
+def safe_copy_with_retries(src: Path, dst: Path, retries: int = 5, wait_sec: float = 1.0) -> bool:
+    """Copy a file with retries to avoid Windows file-in-use errors."""
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.copy2(src, dst)
+            return True
+        except PermissionError:
+            if attempt == retries:
+                return False
+            time.sleep(wait_sec)
+            wait_sec *= 1.5
+        except OSError as e:
+            # WinError 32 or similar
+            if attempt == retries:
+                return False
+            time.sleep(wait_sec)
+            wait_sec *= 1.5
+    return False
 
 
 def process_text_file(text_file_path, results_dir, original_pdf_name):
@@ -196,13 +222,18 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         )
         
         if result.returncode == 0:
+            # Small wait to ensure file handles are released by child process
+            time.sleep(0.5)
             # Find the generated Excel file
             excel_files = list(output_dir.glob("*.xlsx"))
             if excel_files:
-                # Rename to original PDF name
+                # Rename to original PDF name with retry-safe copy
                 result_file = output_dir / f"{original_pdf_name.replace('.pdf', '')}.xlsx"
-                shutil.copy2(excel_files[0], result_file)
-                return str(result_file), None
+                ok = safe_copy_with_retries(excel_files[0], result_file)
+                if ok:
+                    return str(result_file), None
+                else:
+                    return None, "Failed to finalize result file due to file lock"
             else:
                 return None, "No Excel file generated"
         
@@ -350,8 +381,9 @@ def main():
                 with col3:
                     st.metric("Generated", datetime.fromtimestamp(result_file.stat().st_mtime).strftime("%H:%M:%S"))
                 
-                # Preview Excel content
+                # Preview Excel content (retry on Windows locks)
                 try:
+                    time.sleep(0.3)
                     excel_data = pd.read_excel(result_file, sheet_name=None)
                     
                     if len(excel_data) == 1:
