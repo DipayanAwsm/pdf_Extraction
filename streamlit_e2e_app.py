@@ -200,6 +200,40 @@ def safe_copy_with_retries(src: Path, dst: Path, retries: int = 5, wait_sec: flo
     return False
 
 
+def safe_finalize_result(src: Path, desired_dst: Path, retries: int = 6, wait_sec: float = 0.6) -> Path:
+    """Try to rename (atomic replace) or copy the src to desired_dst with retries.
+    If both fail due to file lock, return the src path to be used as-is.
+    """
+    # Try os.replace first (atomic move/rename)
+    for attempt in range(1, retries + 1):
+        try:
+            # If src is already the desired file, just return it
+            if src.resolve() == desired_dst.resolve():
+                return desired_dst
+            # Ensure parent exists
+            desired_dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, desired_dst)
+            return desired_dst
+        except Exception:
+            if attempt == retries:
+                break
+            time.sleep(wait_sec)
+            wait_sec *= 1.5
+    # Try copy2 as fallback
+    wait_sec = 0.6
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.copy2(src, desired_dst)
+            return desired_dst
+        except Exception:
+            if attempt == retries:
+                # As a last resort, return the original src path to use directly
+                return src
+            time.sleep(wait_sec)
+            wait_sec *= 1.5
+    return src
+
+
 def process_text_file(text_file_path, results_dir, original_pdf_name):
     """Process text file using text_lob_llm_extractor.py"""
     try:
@@ -223,15 +257,15 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         
         if result.returncode == 0:
             # Small wait to ensure file handles are released by child process
-            time.sleep(0.5)
+            time.sleep(0.8)
             # Find the generated Excel file
             excel_files = list(output_dir.glob("*.xlsx"))
             if excel_files:
-                # Rename to original PDF name with retry-safe copy
+                # Rename to original PDF name with robust finalize
                 result_file = output_dir / f"{original_pdf_name.replace('.pdf', '')}.xlsx"
-                ok = safe_copy_with_retries(excel_files[0], result_file)
-                if ok:
-                    return str(result_file), None
+                finalized_path = safe_finalize_result(excel_files[0], result_file)
+                if finalized_path and Path(finalized_path).exists():
+                    return str(finalized_path), None
                 else:
                     return None, "Failed to finalize result file due to file lock"
             else:
