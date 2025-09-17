@@ -125,8 +125,8 @@ def classify_lobs_multi_openai(client, model: str, text: str) -> List[str]:
     prompt = f"""
 You are an insurance domain expert. Determine ALL Lines of Business (LoBs) present in the content.
 Choose any that apply from exactly these values: AUTO, GENERAL LIABILITY, WC.
-
-Return STRICT JSON ONLY: {{"lobs": ["AUTO"|"GENERAL LIABILITY"|"WC", ...]}}
+Return STRICT JSON ONLY with no commentary and no markdown. Use double quotes and valid JSON.
+Schema: {{"lobs": ["AUTO"|"GENERAL LIABILITY"|"WC", ...]}}
 Content:\n{text}
 """
     try:
@@ -135,20 +135,19 @@ Content:\n{text}
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=200000,
+            response_format={"type": "json_object"}
         )
         content = resp.choices[0].message.content
-        start = content.find('{'); end = content.rfind('}') + 1
-        if start != -1 and end > start:
-            obj = json.loads(content[start:end])
-            lobs = obj.get('lobs') or []
-            out = []
-            for v in lobs:
-                s = str(v).strip().upper()
-                if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in out:
-                    out.append(s)
-            if out:
-                return out
-    except Exception as e:
+        obj = json.loads(content)
+        lobs = obj.get('lobs') or []
+        out = []
+        for v in lobs:
+            s = str(v).strip().upper()
+            if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in out:
+                out.append(s)
+        if out:
+            return out
+    except Exception:
         pass
     # Fallback heuristic
     t = text.upper()
@@ -209,14 +208,13 @@ def extract_fields_openai(client, model: str, text: str, lob: str) -> Dict:
 
     prompt = f"""
 Extract structured fields from the content for LoB={lob}.
-Return STRICT JSON ONLY matching this schema:
+Return STRICT JSON ONLY matching this schema with no commentary and no markdown fences:
 {schema}
 Rules: ISO dates if possible; keep amounts/strings as-is; empty string if missing; preserve row order.
 IMPORTANT: Extract the carrier/company name from the content. This is critical.
 
 Content:\n{text}
 """
-    # Backoff retries
     max_attempts = 4
     delay_seconds = 1.0
     for attempt in range(1, max_attempts + 1):
@@ -226,15 +224,14 @@ Content:\n{text}
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=200000,
+                response_format={"type": "json_object"}
             )
             content = resp.choices[0].message.content
-            start = content.find('{'); end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                obj = json.loads(content[start:end])
-                if isinstance(obj, dict) and 'claims' in obj and isinstance(obj['claims'], list):
-                    obj.setdefault('evaluation_date','')
-                    obj.setdefault('carrier','')
-                    return obj
+            obj = json.loads(content)
+            if isinstance(obj, dict) and 'claims' in obj and isinstance(obj['claims'], list):
+                obj.setdefault('evaluation_date','')
+                obj.setdefault('carrier','')
+                return obj
         except Exception as e:
             if attempt == max_attempts:
                 print(f"WARNING: OpenAI extraction failed after retries: {e}")
@@ -243,6 +240,23 @@ Content:\n{text}
             delay_seconds *= 2
             continue
     return {"evaluation_date":"","carrier":"","claims": []}
+
+
+def extract_fields_openai_chunked(client, model: str, text: str, lob: str) -> Dict:
+    chunks = _chunk_text(text)
+    if not chunks:
+        chunks = [text]
+    merged = {"evaluation_date": "", "carrier": "", "claims": []}
+    for idx, part in enumerate(chunks):
+        result = extract_fields_openai(client, model, part, lob)
+        if result.get('evaluation_date') and not merged['evaluation_date']:
+            merged['evaluation_date'] = result.get('evaluation_date','')
+        if result.get('carrier') and not merged['carrier']:
+            merged['carrier'] = result.get('carrier','')
+        if isinstance(result.get('claims'), list):
+            merged['claims'].extend(result['claims'])
+        time.sleep(0.5)
+    return merged
 
 
 def process_text_file(text_file_path: str, client, model: str) -> List[Dict]:
@@ -254,7 +268,8 @@ def process_text_file(text_file_path: str, client, model: str) -> List[Dict]:
         lobs = classify_lobs_multi_openai(client, model, text_content)
         print(f"Detected LoBs: {lobs}")
         for lob in lobs:
-            fields = extract_fields_openai(client, model, text_content, lob)
+            # Use chunked extraction for long texts
+            fields = extract_fields_openai_chunked(client, model, text_content, lob)
             carrier = fields.get('carrier') or _extract_carrier_from_text(text_content) or _extract_carrier_from_filename(text_file_path)
             results.append({
                 'lob': lob,
@@ -351,7 +366,7 @@ def main():
     wc_rows: List[Dict] = []
 
     for text_file in text_files:
-        results = process_text_file(str(text_file), client, cfg['openai_model'])
+        results = process_text_file(str(text_file), client, cfg['use_azure'] and cfg['azure_deployment'] or cfg['openai_model'])
         if not results:
             continue
         for result in results:
