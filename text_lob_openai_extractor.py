@@ -124,9 +124,9 @@ def _chunk_text(text: str, max_chars: int = 15000, overlap_chars: int = 800) -> 
 def classify_lobs_multi_openai(client, model: str, text: str) -> List[str]:
     prompt = f"""
 You are an insurance domain expert. Determine ALL Lines of Business (LoBs) present in the content.
-Choose any that apply from exactly these values: AUTO, GENERAL LIABILITY, WC.
+Choose any that apply from exactly these values: AUTO, GENERAL LIABILITY, WC, PROPERTY.
 Return STRICT JSON ONLY with no commentary and no markdown. Use double quotes and valid JSON.
-Schema: {{"lobs": ["AUTO"|"GENERAL LIABILITY"|"WC", ...]}}
+Schema: {{"lobs": ["AUTO"|"GENERAL LIABILITY"|"WC"|"PROPERTY", ...]}}
 Content:\n{text}
 """
     try:
@@ -143,7 +143,7 @@ Content:\n{text}
         out = []
         for v in lobs:
             s = str(v).strip().upper()
-            if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in out:
+            if s in {"AUTO","GENERAL LIABILITY","WC","PROPERTY"} and s not in out:
                 out.append(s)
         if out:
             return out
@@ -158,12 +158,26 @@ Content:\n{text}
         found.append("GENERAL LIABILITY")
     if any(k in t for k in [" WORKERS' COMP", " WORKERS COMP", " WC ", " TTD", " TPD", " INDEMNITY", " MEDICAL ONLY", " LOST TIME", " OSHA ", " EMPLOYEE ", " EMPLOYER "]):
         found.append("WC")
+    if any(k in t for k in [" PROPERTY ", " DWELLING", " BUILDING", " CONTENTS", " FIRE", " THEFT", " WIND", " HOMEOWNER", " HO-3", " LANDLORD"]):
+        found.append("PROPERTY")
     return found or ["AUTO"]
 
 
 def extract_fields_openai(client, model: str, text: str, lob: str) -> Dict:
     lob = lob.upper()
     if lob == 'AUTO':
+        schema = {
+            "evaluation_date": "string",
+            "carrier": "string",
+            "claims": [{
+                "claim_number": "string",
+                "loss_date": "string",
+                "paid_loss": "string",
+                "reserve": "string",
+                "alae": "string"
+            }]
+        }
+    elif lob == 'PROPERTY':
         schema = {
             "evaluation_date": "string",
             "carrier": "string",
@@ -288,10 +302,12 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
     auto_df = per_lob.get('AUTO')
     gl_df = per_lob.get('GL')
     wc_df = per_lob.get('WC')
+    property_df = per_lob.get('PROPERTY')
 
     has_auto = auto_df is not None and not auto_df.empty
     has_gl = gl_df is not None and not gl_df.empty
     has_wc = wc_df is not None and not wc_df.empty
+    has_property = property_df is not None and not property_df.empty
 
     if has_auto:
         try:
@@ -300,6 +316,13 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
                 auto_df.to_excel(w, sheet_name='auto_claims', index=False)
         except Exception as e:
             print(f"WARNING: Failed writing AUTO output: {e}")
+    if has_property:
+        try:
+            d = out_dir / 'property'; d.mkdir(parents=True, exist_ok=True)
+            with pd.ExcelWriter(d / 'PROPERTY_consolidated.xlsx', engine='openpyxl') as w:
+                property_df.to_excel(w, sheet_name='property_claims', index=False)
+        except Exception as e:
+            print(f"WARNING: Failed writing PROPERTY output: {e}")
     if has_gl:
         try:
             d = out_dir / 'GL'; d.mkdir(parents=True, exist_ok=True)
@@ -315,11 +338,13 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
         except Exception as e:
             print(f"WARNING: Failed writing WC output: {e}")
 
-    if has_auto or has_gl or has_wc:
+    if has_auto or has_property or has_gl or has_wc:
         try:
             with pd.ExcelWriter(out_dir / 'result.xlsx', engine='openpyxl') as w:
                 if has_auto:
                     auto_df.to_excel(w, sheet_name='auto_claims', index=False)
+                if has_property:
+                    property_df.to_excel(w, sheet_name='property_claims', index=False)
                 if has_gl:
                     gl_df.to_excel(w, sheet_name='gl_claims', index=False)
                 if has_wc:
@@ -362,6 +387,7 @@ def main():
     print(f"Found {len(text_files)} text file(s) to process")
 
     auto_rows: List[Dict] = []
+    property_rows: List[Dict] = []
     gl_rows: List[Dict] = []
     wc_rows: List[Dict] = []
 
@@ -378,6 +404,18 @@ def main():
             if lob == 'AUTO':
                 for c in fields.get('claims', []):
                     auto_rows.append({
+                        'evaluation_date': fields.get('evaluation_date',''),
+                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'claim_number': c.get('claim_number',''),
+                        'loss_date': c.get('loss_date',''),
+                        'paid_loss': c.get('paid_loss',''),
+                        'reserve': c.get('reserve',''),
+                        'alae': c.get('alae',''),
+                        'source_file': source_file
+                    })
+            elif lob == 'PROPERTY':
+                for c in fields.get('claims', []):
+                    property_rows.append({
                         'evaluation_date': fields.get('evaluation_date',''),
                         'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
                         'claim_number': c.get('claim_number',''),
@@ -423,6 +461,10 @@ def main():
         per_lob['AUTO'] = pd.DataFrame(auto_rows, columns=['evaluation_date','carrier','claim_number','loss_date','paid_loss','reserve','alae','source_file'])
     else:
         per_lob['AUTO'] = pd.DataFrame()
+    if property_rows:
+        per_lob['PROPERTY'] = pd.DataFrame(property_rows, columns=['evaluation_date','carrier','claim_number','loss_date','paid_loss','reserve','alae','source_file'])
+    else:
+        per_lob['PROPERTY'] = pd.DataFrame()
     if gl_rows:
         per_lob['GL'] = pd.DataFrame(gl_rows, columns=['evaluation_date','carrier','claim_number','loss_date','bi_paid_loss','pd_paid_loss','bi_reserve','pd_reserve','alae','source_file'])
     else:
@@ -435,6 +477,7 @@ def main():
     write_outputs(per_lob, out_dir)
     print(f"\nProcessing Summary:")
     print(f"   AUTO claims: {len(auto_rows)}")
+    print(f"   PROPERTY claims: {len(property_rows)}")
     print(f"   GL claims: {len(gl_rows)}")
     print(f"   WC claims: {len(wc_rows)}")
     print(f"   Output directory: {out_dir}")
