@@ -297,6 +297,103 @@ def preview_pdf(pdf_path):
         return None
 
 
+def _normalize_colname(name: str) -> str:
+    return ''.join(c for c in name.lower() if c.isalnum())
+
+def _coerce_money(value):
+    if pd.isna(value):
+        return 0.0
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value)
+        negative = False
+        s = s.strip()
+        if s.startswith('(') and s.endswith(')'):
+            negative = True
+            s = s[1:-1]
+        s = s.replace('$', '').replace(',', '').replace(' ', '')
+        if s == '' or s == '-':
+            return 0.0
+        num = float(s)
+        return -num if negative else num
+    except Exception:
+        return 0.0
+
+
+def _find_first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if df is None or df.empty:
+        return None
+    norm_map = {_normalize_colname(c): c for c in df.columns}
+    for cand in candidates:
+        if cand in norm_map:
+            return norm_map[cand]
+    return None
+
+
+def compute_lob_summary(excel_sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows = []
+    for sheet_name, df in excel_sheets.items():
+        lob = sheet_name.strip().upper()
+        n_rows = int(len(df)) if df is not None else 0
+        paid_total = 0.0
+        alae_total = 0.0
+        if df is None or df.empty:
+            rows.append({"LOB": lob, "Rows": 0, "Total Paid Loss": 0.0, "Total ALAE": 0.0})
+            continue
+        # Prepare normalized lookup once
+        norm_cols = {_normalize_colname(c): c for c in df.columns}
+        def get_col(cands: list[str]):
+            for c in cands:
+                if c in norm_cols:
+                    return norm_cols[c]
+            return None
+        if lob in ["AUTO", "PROPERTY"]:
+            paid_col = get_col(["paidloss", "paid_loss", "paid", "totpaid", "totalpaid"])
+            alae_col = get_col(["alae", "totalalae", "expense", "totalexpense"])
+            if paid_col:
+                paid_total = float(pd.Series(df[paid_col]).map(_coerce_money).sum())
+            if alae_col:
+                alae_total = float(pd.Series(df[alae_col]).map(_coerce_money).sum())
+        elif lob in ["GL", "GENERAL LIABILITY", "GENERALLIABILITY"]:
+            bi_col = get_col(["bodilyinjurypaidloss", "bipaidloss", "bodilyinjury", "bodilyinjurypaid"])
+            pd_col = get_col(["propertydamagepaidloss", "pdpailoss", "propertydamage", "propertydamagepaid"])
+            alae_col = get_col(["alae", "totalalae", "expense", "totalexpense"])
+            if bi_col:
+                paid_total += float(pd.Series(df[bi_col]).map(_coerce_money).sum())
+            if pd_col:
+                paid_total += float(pd.Series(df[pd_col]).map(_coerce_money).sum())
+            if alae_col:
+                alae_total = float(pd.Series(df[alae_col]).map(_coerce_money).sum())
+            lob = "GL"
+        elif lob in ["WC", "WORKERSCOMP", "WORKERSCOMPENSATION", "WORKERCOMPENSESSASION"]:
+            ind_col = get_col(["indemnitypaidloss", "indemnitypaid", "indemnity"])
+            med_col = get_col(["medicalpaidloss", "medicalpaid", "medical"])
+            alae_col = get_col(["alae", "totalalae", "expense", "totalexpense"])
+            if ind_col:
+                paid_total += float(pd.Series(df[ind_col]).map(_coerce_money).sum())
+            if med_col:
+                paid_total += float(pd.Series(df[med_col]).map(_coerce_money).sum())
+            if alae_col:
+                alae_total = float(pd.Series(df[alae_col]).map(_coerce_money).sum())
+            lob = "WC"
+        else:
+            # Fallback: try generic columns
+            paid_col = _find_first_col(df, ["paidloss", "paid", "totalpaid"])
+            alae_col = _find_first_col(df, ["alae", "totalalae", "expense", "totalexpense"])
+            if paid_col:
+                paid_total = float(pd.Series(df[paid_col]).map(_coerce_money).sum())
+            if alae_col:
+                alae_total = float(pd.Series(df[alae_col]).map(_coerce_money).sum())
+        rows.append({
+            "LOB": lob,
+            "Rows": n_rows,
+            "Total Paid Loss": round(paid_total, 2),
+            "Total ALAE": round(alae_total, 2)
+        })
+    return pd.DataFrame(rows)
+
+
 def main():
     # Display logo in sidebar (upper left)
     display_logo()
@@ -419,7 +516,13 @@ def main():
                 try:
                     time.sleep(0.3)
                     excel_data = pd.read_excel(result_file, sheet_name=None)
-                    
+                    # Summary by LOB
+                    try:
+                        summary_df = compute_lob_summary(excel_data)
+                        st.subheader("Summary by LOB")
+                        st.dataframe(summary_df, use_container_width=True)
+                    except Exception as _:
+                        st.warning("Could not compute LOB summary.")
                     if len(excel_data) == 1:
                         # Single sheet
                         sheet_name = list(excel_data.keys())[0]
