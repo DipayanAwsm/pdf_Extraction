@@ -8,6 +8,8 @@ from pathlib import Path
 import shutil
 from datetime import datetime
 import fitz  # PyMuPDF - PDF processing library
+import altair as alt
+import io
 
 
 # Page configuration
@@ -519,10 +521,137 @@ def main():
                     # Summary by LOB
                     try:
                         summary_df = compute_lob_summary(excel_data)
-                        st.subheader("Summary by LOB")
-                        st.dataframe(summary_df, use_container_width=True)
+                        with st.expander("Summary by LOB", expanded=False):
+                            st.dataframe(summary_df, use_container_width=True)
                     except Exception as _:
                         st.warning("Could not compute LOB summary.")
+
+                    # Summary & Charts on demand
+                    if st.button("📊 Show Summary & Charts"):
+                        try:
+                            # Build LOB-wise totals with proper mappings
+                            lob_rows = []
+                            claims_rows = []
+                            for sheet_name, df in excel_data.items():
+                                if df is None or df.empty:
+                                    continue
+                                lob = sheet_name.strip().upper()
+                                norm_cols = {_normalize_colname(c): c for c in df.columns}
+                                def get_col(cands):
+                                    for c in cands:
+                                        if c in norm_cols:
+                                            return norm_cols[c]
+                                    return None
+                                # Common columns
+                                claim_col = get_col(["claimnumber","claim_no","claim#","claimid","claim"])
+                                alae_col = get_col(["alae","totalalae","expense","totalexpense"])
+                                # Compute per-row total loss
+                                if lob in ["AUTO","PROPERTY"]:
+                                    paid_col = get_col(["paidloss","paid_loss","paid","totpaid","totalpaid"])
+                                    if paid_col:
+                                        losses = pd.Series(df[paid_col]).map(_coerce_money)
+                                    else:
+                                        losses = pd.Series([0.0]*len(df))
+                                elif lob in ["GL","GENERAL LIABILITY","GENERALLIABILITY"]:
+                                    bi_col = get_col(["bodilyinjurypaidloss","bipaidloss","bodilyinjury","bodilyinjurypaid"])
+                                    pd_col = get_col(["propertydamagepaidloss","pdpailoss","propertydamage","propertydamagepaid"])  # pdpAiLoss typo-safe
+                                    bi_vals = pd.Series(df[bi_col]).map(_coerce_money) if bi_col else pd.Series([0.0]*len(df))
+                                    pd_vals = pd.Series(df[pd_col]).map(_coerce_money) if pd_col else pd.Series([0.0]*len(df))
+                                    losses = bi_vals.add(pd_vals, fill_value=0.0)
+                                    lob = "GL"
+                                else:  # WC variants
+                                    ind_col = get_col(["indemnitypaidloss","indemnitypaid","indemnity"])
+                                    med_col = get_col(["medicalpaidloss","medicalpaid","medical"])
+                                    ind_vals = pd.Series(df[ind_col]).map(_coerce_money) if ind_col else pd.Series([0.0]*len(df))
+                                    med_vals = pd.Series(df[med_col]).map(_coerce_money) if med_col else pd.Series([0.0]*len(df))
+                                    losses = ind_vals.add(med_vals, fill_value=0.0)
+                                    lob = "WC"
+                                alae_vals = pd.Series(df[alae_col]).map(_coerce_money) if alae_col else pd.Series([0.0]*len(df))
+                                # LOB totals
+                                lob_rows.append({
+                                    "LOB": lob,
+                                    "Total Loss": float(losses.sum()),
+                                    "Total ALAE": float(alae_vals.sum()),
+                                })
+                                # Per-claim aggregates (loss and alae)
+                                if claim_col:
+                                    tmp = pd.DataFrame({
+                                        "claim_number": df[claim_col].astype(str),
+                                        "loss": losses.astype(float),
+                                        "alae": alae_vals.astype(float),
+                                        "lob": lob,
+                                    })
+                                    claims_rows.append(tmp)
+                            if not lob_rows:
+                                st.info("No data available for charts.")
+                            else:
+                                lob_totals = pd.DataFrame(lob_rows).groupby("LOB", as_index=False).sum(numeric_only=True)
+                                st.markdown("### LOB-wise Totals")
+                                st.dataframe(lob_totals, use_container_width=True)
+                                # Pie: LOB-wise total loss
+                                pie = alt.Chart(lob_totals).mark_arc().encode(
+                                    theta=alt.Theta(field="Total Loss", type="quantitative"),
+                                    color=alt.Color(field="LOB", type="nominal"),
+                                    tooltip=["LOB","Total Loss","Total ALAE"]
+                                ).properties(title="LOB-wise Total Loss (Pie)")
+                                st.altair_chart(pie, use_container_width=True)
+                                # Bar: LOB-wise total loss
+                                bar_lob_loss = alt.Chart(lob_totals).mark_bar().encode(
+                                    x=alt.X("LOB:N", sort='-y'), y=alt.Y("Total Loss:Q"), color="LOB:N", tooltip=["LOB","Total Loss"]
+                                ).properties(title="LOB-wise Total Loss (Bar)")
+                                st.altair_chart(bar_lob_loss, use_container_width=True)
+                                # Bar: LOB-wise ALAE
+                                bar_lob_alae = alt.Chart(lob_totals).mark_bar(color="#2e8b57").encode(
+                                    x=alt.X("LOB:N", sort='-y'), y=alt.Y("Total ALAE:Q"), tooltip=["LOB","Total ALAE"]
+                                ).properties(title="LOB-wise ALAE (Bar)")
+                                st.altair_chart(bar_lob_alae, use_container_width=True)
+                                # Claim-level charts
+                                claim_loss = pd.DataFrame()
+                                claim_counts = pd.DataFrame()
+                                if claims_rows:
+                                    claims_df = pd.concat(claims_rows, ignore_index=True)
+                                    # Claim number wise loss (top 20)
+                                    claim_loss = claims_df.groupby("claim_number", as_index=False)["loss"].sum().sort_values("loss", ascending=False).head(20)
+                                    bar_claim_loss = alt.Chart(claim_loss).mark_bar().encode(
+                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("loss:Q", title="Loss"),
+                                        tooltip=["claim_number","loss"]
+                                    ).properties(title="Claim Number-wise Loss (Top 20)")
+                                    st.altair_chart(bar_claim_loss, use_container_width=True)
+                                    # Claim number counts
+                                    claim_counts = claims_df.groupby("claim_number", as_index=False).size()
+                                    claim_counts = claim_counts.rename(columns={"size": "count"}).sort_values("count", ascending=False).head(20)
+                                    bar_claim_counts = alt.Chart(claim_counts).mark_bar(color="#1f77b4").encode(
+                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("count:Q", title="Count"),
+                                        tooltip=["claim_number","count"]
+                                    ).properties(title="Claim Number Counts (Top 20)")
+                                    st.altair_chart(bar_claim_counts, use_container_width=True)
+                                else:
+                                    st.info("Claim-level charts not available (claim number column missing).")
+                                # Downloadable summary (Excel with multiple sheets)
+                                try:
+                                    buffer = io.BytesIO()
+                                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                        lob_totals.to_excel(writer, sheet_name='LOB_Totals', index=False)
+                                        try:
+                                            summary_df.to_excel(writer, sheet_name='LOB_Summary', index=False)
+                                        except Exception:
+                                            pass
+                                        if not claim_loss.empty:
+                                            claim_loss.to_excel(writer, sheet_name='Claim_Loss_Top20', index=False)
+                                        if not claim_counts.empty:
+                                            claim_counts.to_excel(writer, sheet_name='Claim_Counts_Top20', index=False)
+                                    buffer.seek(0)
+                                    st.download_button(
+                                        label="⬇️ Download Summary (Excel)",
+                                        data=buffer,
+                                        file_name=f"{result_file.stem}_summary.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                                except Exception as e:
+                                    st.warning(f"Could not prepare summary download: {e}")
+                        except Exception as e:
+                            st.warning(f"Could not build charts: {e}")
+
                     if len(excel_data) == 1:
                         # Single sheet
                         sheet_name = list(excel_data.keys())[0]
@@ -534,7 +663,7 @@ def main():
                         for sheet_name, df in excel_data.items():
                             with st.expander(f"📄 {sheet_name}", expanded=(sheet_name == list(excel_data.keys())[0])):
                                 st.dataframe(df, use_container_width=True)
-                    
+                
                 except Exception as e:
                     st.warning(f"Could not preview Excel content: {e}")
                 
