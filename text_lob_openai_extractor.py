@@ -13,6 +13,13 @@ except ImportError:
     raise SystemExit("Please install openai: pip install openai>=1.30.0")
 
 
+# === Chunking and backoff configuration (overridable by CLI) ===
+DEFAULT_MAX_CHARS = 12000
+DEFAULT_OVERLAP_CHARS = 800
+DEFAULT_CHUNK_SLEEP = 0.5
+DEFAULT_MAX_ATTEMPTS = 5
+
+
 def load_config(config_file: str = "config.py") -> Dict[str, str]:
     config_path = Path(config_file)
     if not config_path.exists():
@@ -102,7 +109,7 @@ def _extract_carrier_from_filename(file_path: str) -> str:
     return ""
 
 
-def _chunk_text(text: str, max_chars: int = 15000, overlap_chars: int = 800) -> List[str]:
+def _chunk_text(text: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS) -> List[str]:
     chunks: List[str] = []
     if not text:
         return chunks
@@ -163,7 +170,7 @@ Content:\n{text}
     return found or ["AUTO"]
 
 
-def extract_fields_openai(client, model: str, text: str, lob: str) -> Dict:
+def extract_fields_openai(client, model: str, text: str, lob: str, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> Dict:
     lob = lob.upper()
     if lob == 'AUTO':
         schema = {
@@ -229,7 +236,6 @@ IMPORTANT: Extract the carrier/company name from the content. This is critical.
 
 Content:\n{text}
 """
-    max_attempts = 4
     delay_seconds = 1.0
     for attempt in range(1, max_attempts + 1):
         try:
@@ -247,17 +253,23 @@ Content:\n{text}
                 obj.setdefault('carrier','')
                 return obj
         except Exception as e:
+            # Handle rate limiting or transient errors with exponential backoff
+            msg = str(e).lower()
+            is_rate = ('rate' in msg) or ('too many requests' in msg) or ('overloaded' in msg)
+            is_timeout = ('timeout' in msg) or ('timed out' in msg)
             if attempt == max_attempts:
                 print(f"WARNING: OpenAI extraction failed after retries: {e}")
                 break
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
+            sleep_for = delay_seconds * (2 ** (attempt - 1))
+            if is_rate:
+                sleep_for = max(sleep_for, 2.0)
+            time.sleep(sleep_for)
             continue
     return {"evaluation_date":"","carrier":"","claims": []}
 
 
-def extract_fields_openai_chunked(client, model: str, text: str, lob: str) -> Dict:
-    chunks = _chunk_text(text)
+def extract_fields_openai_chunked(client, model: str, text: str, lob: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS, per_chunk_sleep: float = DEFAULT_CHUNK_SLEEP) -> Dict:
+    chunks = _chunk_text(text, max_chars=max_chars, overlap_chars=overlap_chars)
     if not chunks:
         chunks = [text]
     merged = {"evaluation_date": "", "carrier": "", "claims": []}
@@ -269,21 +281,23 @@ def extract_fields_openai_chunked(client, model: str, text: str, lob: str) -> Di
             merged['carrier'] = result.get('carrier','')
         if isinstance(result.get('claims'), list):
             merged['claims'].extend(result['claims'])
-        time.sleep(0.5)
+        time.sleep(per_chunk_sleep)
     return merged
 
 
-def process_text_file(text_file_path: str, client, model: str) -> List[Dict]:
+def process_text_file(text_file_path: str, client, model: str, max_chars: int, overlap_chars: int, per_chunk_sleep: float) -> List[Dict]:
     results: List[Dict] = []
     try:
         with open(text_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text_content = f.read()
         print(f"Processing text file: {text_file_path} ({len(text_content)} chars)")
-        lobs = classify_lobs_multi_openai(client, model, text_content)
+        lobs = classify_lobs_multi_openai(client, model, text_content[:20000])  # classify on prefix for speed
         print(f"Detected LoBs: {lobs}")
         for lob in lobs:
-            # Use chunked extraction for long texts
-            fields = extract_fields_openai_chunked(client, model, text_content, lob)
+            fields = extract_fields_openai_chunked(
+                client, model, text_content, lob,
+                max_chars=max_chars, overlap_chars=overlap_chars, per_chunk_sleep=per_chunk_sleep
+            )
             carrier = fields.get('carrier') or _extract_carrier_from_text(text_content) or _extract_carrier_from_filename(text_file_path)
             results.append({
                 'lob': lob,
@@ -361,6 +375,9 @@ def main():
     p.add_argument("--config", default="config.py", help="Path to config.py")
     p.add_argument("--out", dest="out_dir", default="text_llm_results_openai", help="Output directory")
     p.add_argument("--pattern", default="*.txt", help="File pattern for directory processing (default: *.txt)")
+    p.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help="Max characters per chunk")
+    p.add_argument("--overlap", type=int, default=DEFAULT_OVERLAP_CHARS, help="Overlap characters between chunks")
+    p.add_argument("--chunk-sleep", type=float, default=DEFAULT_CHUNK_SLEEP, help="Sleep seconds between chunk calls")
     args = p.parse_args()
 
     cfg = load_config(args.config)
@@ -392,7 +409,10 @@ def main():
     wc_rows: List[Dict] = []
 
     for text_file in text_files:
-        results = process_text_file(str(text_file), client, cfg['use_azure'] and cfg['azure_deployment'] or cfg['openai_model'])
+        results = process_text_file(
+            str(text_file), client, cfg['use_azure'] and cfg['azure_deployment'] or cfg['openai_model'],
+            max_chars=args.max_chars, overlap_chars=args.overlap, per_chunk_sleep=args.chunk_sleep
+        )
         if not results:
             continue
         for result in results:

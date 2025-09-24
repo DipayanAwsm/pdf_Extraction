@@ -9,6 +9,22 @@ import boto3
 import time
 
 
+# Tunables for large documents (can be overridden via CLI)
+DEFAULT_MAX_CHARS = 15000
+DEFAULT_OVERLAP_CHARS = 800
+DEFAULT_CHUNK_SLEEP = 0.5
+DEFAULT_MAX_ATTEMPTS = 5
+
+# Token-based chunking defaults
+DEFAULT_MAX_TOKENS = 3000
+DEFAULT_OVERLAP_TOKENS = 200
+
+try:
+    import tiktoken  # Optional, used for token-based chunking
+except Exception:
+    tiktoken = None
+
+
 def load_aws_config_from_py(config_file: str = "config.py") -> Dict[str, str]:
     config_path = Path(config_file)
     if not config_path.exists():
@@ -200,7 +216,7 @@ Content:\n{text}
     return [single] if single else ["AUTO"]
 
 
-def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str) -> Dict:
+def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> Dict:
     lob = lob.upper()
     if lob == 'AUTO':
         schema = {
@@ -252,13 +268,16 @@ def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str) -> Di
 Extract structured fields from the content for LoB={lob}.
 Return STRICT JSON ONLY matching this schema:
 {schema}
-Rules: ISO dates if possible; keep amounts/strings as-is; empty string if missing; preserve row order.
+Rules:
+- Use ISO-like dates if possible
+- Keep amounts/strings as-is
+- Empty string if missing
+- Preserve row order
+- Do NOT invent rows that are not present
 IMPORTANT: Extract the carrier/company name from the content. This is critical.
 
 Content:\n{text}
 """
-    # Exponential backoff retries for robustness on long texts / throttling
-    max_attempts = 4
     delay_seconds = 1.0
     for attempt in range(1, max_attempts + 1):
         try:
@@ -284,14 +303,36 @@ Content:\n{text}
             if attempt == max_attempts:
                 print(f"WARNING: LLM extraction failed after retries: {e}")
                 break
-            # Backoff
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
+            # Exponential backoff; slightly longer if throttled
+            msg = str(e).lower()
+            sleep_for = delay_seconds * (2 ** (attempt - 1))
+            if ('throttle' in msg) or ('rate' in msg) or ('too many' in msg):
+                sleep_for = max(sleep_for, 2.0)
+            time.sleep(sleep_for)
             continue
     return {"evaluation_date":"","carrier":"","claims": []}
 
 
-def _chunk_text_for_llm(text: str, max_chars: int = 15000, overlap_chars: int = 800) -> List[str]:
+def _chunk_text_for_llm(text: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS, use_token_chunking: bool = False, max_tokens: int = DEFAULT_MAX_TOKENS, overlap_tokens: int = DEFAULT_OVERLAP_TOKENS) -> List[str]:
+    if use_token_chunking and tiktoken is not None:
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            enc = None
+        if enc is not None:
+            token_ids = enc.encode(text or "")
+            chunks: List[str] = []
+            start = 0
+            n = len(token_ids)
+            while start < n:
+                end = min(start + max_tokens, n)
+                piece = enc.decode(token_ids[start:end])
+                chunks.append(piece)
+                if end >= n:
+                    break
+                start = max(0, end - overlap_tokens)
+            return chunks
+    # Fallback to character-based chunking
     chunks: List[str] = []
     if not text:
         return chunks
@@ -312,9 +353,16 @@ def _chunk_text_for_llm(text: str, max_chars: int = 15000, overlap_chars: int = 
     return chunks
 
 
-def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str) -> Dict:
+def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS, per_chunk_sleep: float = DEFAULT_CHUNK_SLEEP, use_token_chunking: bool = False, max_tokens: int = DEFAULT_MAX_TOKENS, overlap_tokens: int = DEFAULT_OVERLAP_TOKENS) -> Dict:
     """Run extract_fields_llm on overlapped chunks and merge results; duplicates are allowed."""
-    chunks = _chunk_text_for_llm(text)
+    chunks = _chunk_text_for_llm(
+        text,
+        max_chars=max_chars,
+        overlap_chars=overlap_chars,
+        use_token_chunking=use_token_chunking,
+        max_tokens=max_tokens,
+        overlap_tokens=overlap_tokens,
+    )
     if not chunks:
         chunks = [text]
     merged = {"evaluation_date": "", "carrier": "", "claims": []}
@@ -328,7 +376,7 @@ def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: st
             # Keep duplicates as requested
             merged['claims'].extend(result['claims'])
         # Gentle pacing to avoid throttling
-        time.sleep(0.5)
+        time.sleep(per_chunk_sleep)
     return merged
 
 
@@ -488,40 +536,33 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
         print("ℹ️ No data found for any LoB. Skipping result.xlsx creation.")
 
 
-def process_text_file(text_file_path: str, bedrock_client, model_id: str) -> List[Dict]:
+def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_chars: int, overlap_chars: int, per_chunk_sleep: float, use_token_chunking: bool, max_tokens: int, overlap_tokens: int) -> List[Dict]:
     """Process a single text file and return a list of extracted results per detected LoB"""
     results: List[Dict] = []
     try:
         import traceback
         with open(text_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text_content = f.read()
-        
         print(f"Processing text file: {text_file_path} ({len(text_content)} chars)")
-        
-        # Classify all LoBs present
-        lobs = classify_lobs_multi(bedrock_client, model_id, text_content)
+        # Classify all LoBs present (use prefix for speed on huge files)
+        lobs = classify_lobs_multi(bedrock_client, model_id, text_content[:20000])
         print(f"Detected LoBs: {lobs}")
-        
         for lob in lobs:
-            # Extract fields using LLM for this LoB only
-            fields = extract_fields_llm_chunked(bedrock_client, model_id, text_content, lob)
-            
+            # Extract fields using chunked LLM for this LoB
+            fields = extract_fields_llm_chunked(
+                bedrock_client, model_id, text_content, lob,
+                max_chars=max_chars, overlap_chars=overlap_chars, per_chunk_sleep=per_chunk_sleep,
+                use_token_chunking=use_token_chunking, max_tokens=max_tokens, overlap_tokens=overlap_tokens
+            )
             # Ensure carrier is extracted - try multiple sources
-            carrier = fields.get('carrier', '')
-            if not carrier:
-                carrier = _extract_carrier_from_text(text_content)
-            if not carrier:
-                carrier = _extract_carrier_from_filename(text_file_path)
-            
+            carrier = fields.get('carrier', '') or _extract_carrier_from_text(text_content) or _extract_carrier_from_filename(text_file_path)
             print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
-            
             results.append({
                 'lob': lob,
                 'carrier': carrier,
                 'fields': fields,
                 'source_file': text_file_path
             })
-        
     except Exception as e:
         import traceback
         print(f"ERROR: Error processing {text_file_path}: {e}")
@@ -535,6 +576,12 @@ def main():
     p.add_argument("--config", default="config.py", help="Path to config.py")
     p.add_argument("--out", dest="out_dir", default="text_llm_results", help="Output directory")
     p.add_argument("--pattern", default="*.txt", help="File pattern for directory processing (default: *.txt)")
+    p.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help="Max characters per chunk")
+    p.add_argument("--overlap", type=int, default=DEFAULT_OVERLAP_CHARS, help="Overlap characters between chunks")
+    p.add_argument("--chunk-sleep", type=float, default=DEFAULT_CHUNK_SLEEP, help="Sleep seconds between chunk calls")
+    p.add_argument("--use-token-chunking", action="store_true", help="Use tiktoken-based token chunking if available")
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="Max tokens per chunk (when token chunking)")
+    p.add_argument("--overlap-tokens", type=int, default=DEFAULT_OVERLAP_TOKENS, help="Overlap tokens between chunks (when token chunking)")
     args = p.parse_args()
 
     cfg = load_aws_config_from_py(args.config)
@@ -567,7 +614,11 @@ def main():
 
     # Process each text file
     for text_file in text_files:
-        results = process_text_file(str(text_file), bedrock, cfg['model_id'])
+        results = process_text_file(
+            str(text_file), bedrock, cfg['model_id'],
+            args.max_chars, args.overlap, args.chunk_sleep,
+            args.use_token_chunking, args.max_tokens, args.overlap_tokens
+        )
         if not results:
             continue
             
@@ -575,17 +626,7 @@ def main():
             lob = result['lob']
             carrier = result['carrier']
             source_file = result['source_file']
-
-            # Use chunked LLM extraction to avoid truncation
-            fields = extract_fields_llm_chunked(bedrock, cfg['model_id'], open(source_file, 'r', encoding='utf-8', errors='ignore').read(), lob)
-
-            # Fallback: for WC, if no claims extracted, try heuristic parsing
-            if lob == 'WC' and (not fields.get('claims')):
-                heuristic = heuristic_extract_wc(open(source_file, 'r', encoding='utf-8', errors='ignore').read())
-                # keep evaluation_date/carrier if LLM missed
-                fields['evaluation_date'] = fields.get('evaluation_date') or heuristic.get('evaluation_date','')
-                fields['carrier'] = fields.get('carrier') or heuristic.get('carrier','')
-                fields['claims'] = heuristic.get('claims', [])
+            fields = result['fields']
 
             if lob == 'AUTO':
                 for c in fields.get('claims', []):
