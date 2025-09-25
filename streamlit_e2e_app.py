@@ -672,38 +672,46 @@ def main():
                                 }
                                 lob_totals = lob_detail_df.groupby("LOB", as_index=False).agg(agg_map)
                                 lob_totals["Avg Claim"] = lob_totals.apply(lambda r: (r["Total Loss"] / r["Claim Count"]) if r["Claim Count"] else 0.0, axis=1)
-                                # ===== Metric Cards ===== (unchanged structure, now fed by corrected totals)
-                                total_loss_all = float(lob_totals["Total Loss"].sum())
-                                colA, colB, colC = st.columns(3)
-                                with colA:
-                                    st.markdown(f"""
-                                    <div class=\"metric-card\">
-                                        <div class=\"metric-title\">Total Loss (All LOBs)</div>
-                                        <div class=\"metric-value\">{total_loss_all:,.2f}</div>
-                                        <div class=\"metric-subtle\">Sum across AUTO, GL, WC</div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                with colB:
-                                    auto_row = lob_totals[lob_totals["LOB"]=="AUTO"]
+                                # ===== Markdown Tiles Row (AUTO, WC, GL) =====
+                                auto_row = lob_totals[lob_totals["LOB"]=="AUTO"]
+                                wc_row = lob_totals[lob_totals["LOB"]=="WC"]
+                                gl_row = lob_totals[lob_totals["LOB"]=="GL"]
+                                c1, c2, c3 = st.columns(3)
+                                with c1:
                                     if not auto_row.empty:
                                         a = auto_row.iloc[0]
                                         st.markdown(f"""
                                         <div class=\"metric-card\">
-                                            <div class=\"metric-title\">AUTO: Total Loss / Claims / Avg</div>
-                                            <div class=\"metric-subtle\">Loss: {a['Total Loss']:,.2f} | Claims: {int(a['Claim Count'])} | Avg: {a['Avg Claim']:,.2f}</div>
+                                            <div class=\"metric-title\">AUTO</div>
+                                            <div class=\"metric-value\">{a['Total Loss']:,.2f}</div>
+                                            <div class=\"metric-subtle\">Claims: {int(a['Claim Count'])} | Avg: {a['Avg Claim']:,.2f} | ALAE: {a['Total ALAE']:,.2f}</div>
                                         </div>
                                         """, unsafe_allow_html=True)
                                     else:
                                         st.markdown("""
                                         <div class=\"metric-card\"><div class=\"metric-title\">AUTO</div><div class=\"metric-subtle\">No data</div></div>
                                         """, unsafe_allow_html=True)
-                                with colC:
-                                    gl_row = lob_totals[lob_totals["LOB"]=="GL"]
+                                with c2:
+                                    if not wc_row.empty:
+                                        w = wc_row.iloc[0]
+                                        st.markdown(f"""
+                                        <div class=\"metric-card\">
+                                            <div class=\"metric-title\">WC</div>
+                                            <div class=\"metric-value\">{w['Total Loss']:,.2f}</div>
+                                            <div class=\"metric-subtle\">Indemnity: {w['Indemnity Paid Loss']:,.2f} | Medical: {w['Medical Paid Loss']:,.2f} | ALAE: {w['Total ALAE']:,.2f}</div>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.markdown("""
+                                        <div class=\"metric-card\"><div class=\"metric-title\">WC</div><div class=\"metric-subtle\">No data</div></div>
+                                        """, unsafe_allow_html=True)
+                                with c3:
                                     if not gl_row.empty:
                                         g = gl_row.iloc[0]
                                         st.markdown(f"""
                                         <div class=\"metric-card\">
-                                            <div class=\"metric-title\">GL: BI + PD + ALAE</div>
+                                            <div class=\"metric-title\">GL</div>
+                                            <div class=\"metric-value\">{g['Total Loss']:,.2f}</div>
                                             <div class=\"metric-subtle\">BI: {g['BI Paid Loss']:,.2f} | PD: {g['PD Paid Loss']:,.2f} | ALAE: {g['Total ALAE']:,.2f}</div>
                                         </div>
                                         """, unsafe_allow_html=True)
@@ -711,15 +719,25 @@ def main():
                                         st.markdown("""
                                         <div class=\"metric-card\"><div class=\"metric-title\">GL</div><div class=\"metric-subtle\">No data</div></div>
                                         """, unsafe_allow_html=True)
-                                wc_row = lob_totals[lob_totals["LOB"]=="WC"]
-                                if not wc_row.empty:
-                                    w = wc_row.iloc[0]
-                                    st.markdown(f"""
-                                    <div class=\"metric-card\">
-                                        <div class=\"metric-title\">WC: Indemnity + Medical + ALAE</div>
-                                        <div class=\"metric-subtle\">Indemnity: {w['Indemnity Paid Loss']:,.2f} | Medical: {w['Medical Paid Loss']:,.2f} | ALAE: {w['Total ALAE']:,.2f}</div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
+
+                                # ===== LOB-wise Top Claims (by claim number) =====
+                                if claims_rows:
+                                    claims_df = pd.concat(claims_rows, ignore_index=True)
+                                    # Prepare top 10 per LOB
+                                    top_n = 10
+                                    for lob_filter in ["AUTO", "WC", "GL"]:
+                                        sub = claims_df[claims_df["lob"]==lob_filter]
+                                        if sub.empty:
+                                            continue
+                                        tops = sub.groupby("claim_number", as_index=False)["loss"].sum().sort_values("loss", ascending=False).head(top_n)
+                                        chart = alt.Chart(tops).mark_bar().encode(
+                                            x=alt.X("claim_number:N", sort='-y', title=f"{lob_filter} Claim Number"),
+                                            y=alt.Y("loss:Q", title="Total Loss"),
+                                            tooltip=["claim_number","loss"]
+                                        ).properties(title=f"Top {top_n} Claims by Loss - {lob_filter}")
+                                        st.altair_chart(chart, use_container_width=True)
+                                else:
+                                    st.info("Top claims charts unavailable (missing claim numbers).")
                                 # Detailed table and charts
                                 st.markdown("### LOB-wise Totals (Detailed)")
                                 st.dataframe(lob_totals, use_container_width=True)
