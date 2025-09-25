@@ -552,37 +552,41 @@ def main():
                     # Summary & Charts on demand
                     if st.button("📊 Show Summary & Charts"):
                         try:
-                            # Build LOB-wise totals with correct component mappings
+                            # Build LOB-wise totals with exact mappings from text_lob_llm_extractor outputs
                             lob_detail_rows = []
                             claims_rows = []
                             for sheet_name, df in excel_data.items():
                                 if df is None or df.empty:
                                     continue
-                                lob_raw = sheet_name.strip().upper()
+                                sn = str(sheet_name).lower()
+                                # Infer LOB from sheet name keys: auto_claims, gl_claims, wc_claims
+                                if 'auto' in sn:
+                                    lob_key = 'AUTO'
+                                elif 'gl' in sn and 'claim' in sn:
+                                    lob_key = 'GL'
+                                elif 'wc' in sn and 'claim' in sn:
+                                    lob_key = 'WC'
+                                else:
+                                    # Unknown or property/not needed for summary -> skip
+                                    continue
                                 norm_cols = {_normalize_colname(c): c for c in df.columns}
-                                def get_col(cands):
-                                    for c in cands:
-                                        if c in norm_cols:
-                                            return norm_cols[c]
-                                    return None
+                                def col_exact(norm_name):
+                                    return norm_cols.get(norm_name)
+                                def series_or_zeros(colname):
+                                    return pd.Series(df[colname]).map(_coerce_money) if colname in df.columns else pd.Series([0.0]*len(df))
                                 # Common columns
-                                claim_col = get_col(["claimnumber","claim_no","claim#","claimid","claim"])
-                                alae_col = get_col(["alae","totalalae","expense","totalexpense"])
+                                claim_col = col_exact("claimnumber") or col_exact("claimno") or col_exact("claim") or col_exact("claimid")
+                                alae_col = col_exact("alae") or col_exact("totalalae") or col_exact("expense") or col_exact("totalexpense")
                                 alae_vals = pd.Series(df[alae_col]).map(_coerce_money) if alae_col else pd.Series([0.0]*len(df))
                                 alae_sum = float(alae_vals.sum())
-                                # Compute per-row loss components and totals by LOB
-                                if lob_raw in ["AUTO","PROPERTY"]:
-                                    paid_col = get_col(["paidloss","paid_loss","paid","totpaid","totalpaid"])
+                                # AUTO: paid_loss
+                                if lob_key == 'AUTO':
+                                    paid_col = col_exact("paidloss") or col_exact("paid_loss")
                                     losses = pd.Series(df[paid_col]).map(_coerce_money) if paid_col else pd.Series([0.0]*len(df))
                                     total_loss = float(losses.sum())
-                                    # claims count (prefer non-empty claim numbers)
-                                    if claim_col:
-                                        claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum())
-                                    else:
-                                        claim_count = int(len(df))
-                                    lob = "AUTO" if lob_raw == "AUTO" else "PROPERTY"
+                                    claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum()) if claim_col else int(len(df))
                                     lob_detail_rows.append({
-                                        "LOB": lob,
+                                        "LOB": 'AUTO',
                                         "Total Loss": total_loss,
                                         "Total ALAE": alae_sum,
                                         "BI Paid Loss": 0.0,
@@ -591,28 +595,25 @@ def main():
                                         "Medical Paid Loss": 0.0,
                                         "Claim Count": claim_count
                                     })
-                                    # Per-claim aggregates
                                     if claim_col:
                                         claims_rows.append(pd.DataFrame({
                                             "claim_number": df[claim_col].astype(str),
                                             "loss": losses.astype(float),
                                             "alae": alae_vals.astype(float),
-                                            "lob": lob,
+                                            "lob": 'AUTO',
                                         }))
-                                elif lob_raw in ["GL","GENERAL LIABILITY","GENERALLIABILITY"]:
-                                    bi_col = get_col(["bodilyinjurypaidloss","bipaidloss","bodilyinjury","bodilyinjurypaid"])
-                                    pd_col = get_col(["propertydamagepaidloss","pdpailoss","propertydamage","propertydamagepaid"])  # pdpAiLoss typo-safe
+                                # GL: bi_paid_loss + pd_paid_loss
+                                elif lob_key == 'GL':
+                                    bi_col = col_exact("bodilyinjurypaidloss") or col_exact("bipaidloss")
+                                    pd_col = col_exact("propertydamagepaidloss") or col_exact("pdpaidloss")
                                     bi_vals = pd.Series(df[bi_col]).map(_coerce_money) if bi_col else pd.Series([0.0]*len(df))
                                     pd_vals = pd.Series(df[pd_col]).map(_coerce_money) if pd_col else pd.Series([0.0]*len(df))
                                     bi_sum = float(bi_vals.sum())
                                     pd_sum = float(pd_vals.sum())
                                     total_loss = bi_sum + pd_sum
-                                    if claim_col:
-                                        claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum())
-                                    else:
-                                        claim_count = int(len(df))
+                                    claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum()) if claim_col else int(len(df))
                                     lob_detail_rows.append({
-                                        "LOB": "GL",
+                                        "LOB": 'GL',
                                         "Total Loss": total_loss,
                                         "Total ALAE": alae_sum,
                                         "BI Paid Loss": bi_sum,
@@ -626,22 +627,20 @@ def main():
                                             "claim_number": df[claim_col].astype(str),
                                             "loss": (bi_vals.add(pd_vals, fill_value=0.0)).astype(float),
                                             "alae": alae_vals.astype(float),
-                                            "lob": "GL",
+                                            "lob": 'GL',
                                         }))
-                                else:  # WC variants
-                                    ind_col = get_col(["indemnitypaidloss","indemnitypaid","indemnity"])
-                                    med_col = get_col(["medicalpaidloss","medicalpaid","medical"])
+                                # WC: Indemnity_paid_loss + Medical_paid_loss (note exact casing)
+                                elif lob_key == 'WC':
+                                    ind_col = col_exact("indemnity_paid_loss") or col_exact("indemnitypaidloss")
+                                    med_col = col_exact("medical_paid_loss") or col_exact("medicalpaidloss")
                                     ind_vals = pd.Series(df[ind_col]).map(_coerce_money) if ind_col else pd.Series([0.0]*len(df))
                                     med_vals = pd.Series(df[med_col]).map(_coerce_money) if med_col else pd.Series([0.0]*len(df))
                                     ind_sum = float(ind_vals.sum())
                                     med_sum = float(med_vals.sum())
                                     total_loss = ind_sum + med_sum
-                                    if claim_col:
-                                        claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum())
-                                    else:
-                                        claim_count = int(len(df))
+                                    claim_count = int(df[claim_col].astype(str).str.strip().ne("").sum()) if claim_col else int(len(df))
                                     lob_detail_rows.append({
-                                        "LOB": "WC",
+                                        "LOB": 'WC',
                                         "Total Loss": total_loss,
                                         "Total ALAE": alae_sum,
                                         "BI Paid Loss": 0.0,
@@ -655,7 +654,7 @@ def main():
                                             "claim_number": df[claim_col].astype(str),
                                             "loss": (ind_vals.add(med_vals, fill_value=0.0)).astype(float),
                                             "alae": alae_vals.astype(float),
-                                            "lob": "WC",
+                                            "lob": 'WC',
                                         }))
                             if not lob_detail_rows:
                                 st.info("No data available for charts.")
@@ -672,10 +671,8 @@ def main():
                                     "Claim Count": "sum",
                                 }
                                 lob_totals = lob_detail_df.groupby("LOB", as_index=False).agg(agg_map)
-                                # Compute average claim for AUTO (and others for completeness)
                                 lob_totals["Avg Claim"] = lob_totals.apply(lambda r: (r["Total Loss"] / r["Claim Count"]) if r["Claim Count"] else 0.0, axis=1)
-
-                                # ===== Metric Cards =====
+                                # ===== Metric Cards ===== (unchanged structure, now fed by corrected totals)
                                 total_loss_all = float(lob_totals["Total Loss"].sum())
                                 colA, colB, colC = st.columns(3)
                                 with colA:
@@ -683,18 +680,17 @@ def main():
                                     <div class=\"metric-card\">
                                         <div class=\"metric-title\">Total Loss (All LOBs)</div>
                                         <div class=\"metric-value\">{total_loss_all:,.2f}</div>
-                                        <div class=\"metric-subtle\">Sum of all components across LOBs</div>
+                                        <div class=\"metric-subtle\">Sum across AUTO, GL, WC</div>
                                     </div>
                                     """, unsafe_allow_html=True)
                                 with colB:
-                                    # AUTO metrics
                                     auto_row = lob_totals[lob_totals["LOB"]=="AUTO"]
                                     if not auto_row.empty:
                                         a = auto_row.iloc[0]
                                         st.markdown(f"""
                                         <div class=\"metric-card\">
                                             <div class=\"metric-title\">AUTO: Total Loss / Claims / Avg</div>
-                                            <div class=\"metric-subtle\">Total Loss: {a['Total Loss']:,.2f} | Claims: {int(a['Claim Count'])} | Avg: {a['Avg Claim']:,.2f}</div>
+                                            <div class=\"metric-subtle\">Loss: {a['Total Loss']:,.2f} | Claims: {int(a['Claim Count'])} | Avg: {a['Avg Claim']:,.2f}</div>
                                         </div>
                                         """, unsafe_allow_html=True)
                                     else:
@@ -702,7 +698,6 @@ def main():
                                         <div class=\"metric-card\"><div class=\"metric-title\">AUTO</div><div class=\"metric-subtle\">No data</div></div>
                                         """, unsafe_allow_html=True)
                                 with colC:
-                                    # GL metrics
                                     gl_row = lob_totals[lob_totals["LOB"]=="GL"]
                                     if not gl_row.empty:
                                         g = gl_row.iloc[0]
@@ -716,7 +711,6 @@ def main():
                                         st.markdown("""
                                         <div class=\"metric-card\"><div class=\"metric-title\">GL</div><div class=\"metric-subtle\">No data</div></div>
                                         """, unsafe_allow_html=True)
-                                # WC metrics card row
                                 wc_row = lob_totals[lob_totals["LOB"]=="WC"]
                                 if not wc_row.empty:
                                     w = wc_row.iloc[0]
@@ -726,51 +720,40 @@ def main():
                                         <div class=\"metric-subtle\">Indemnity: {w['Indemnity Paid Loss']:,.2f} | Medical: {w['Medical Paid Loss']:,.2f} | ALAE: {w['Total ALAE']:,.2f}</div>
                                     </div>
                                     """, unsafe_allow_html=True)
-
-                                # Detailed table
+                                # Detailed table and charts
                                 st.markdown("### LOB-wise Totals (Detailed)")
                                 st.dataframe(lob_totals, use_container_width=True)
-
-                                # Charts based on corrected totals
                                 pie = alt.Chart(lob_totals).mark_arc().encode(
                                     theta=alt.Theta(field="Total Loss", type="quantitative"),
                                     color=alt.Color(field="LOB", type="nominal"),
                                     tooltip=["LOB","Total Loss","Total ALAE","Claim Count","Avg Claim"]
                                 ).properties(title="LOB-wise Total Loss (Pie)")
                                 st.altair_chart(pie, use_container_width=True)
-
                                 bar_lob_loss = alt.Chart(lob_totals).mark_bar().encode(
                                     x=alt.X("LOB:N", sort='-y'), y=alt.Y("Total Loss:Q"), color="LOB:N", tooltip=["LOB","Total Loss"]
                                 ).properties(title="LOB-wise Total Loss (Bar)")
                                 st.altair_chart(bar_lob_loss, use_container_width=True)
-
                                 bar_lob_alae = alt.Chart(lob_totals).mark_bar(color="#2e8b57").encode(
                                     x=alt.X("LOB:N", sort='-y'), y=alt.Y("Total ALAE:Q"), tooltip=["LOB","Total ALAE"]
                                 ).properties(title="LOB-wise ALAE (Bar)")
                                 st.altair_chart(bar_lob_alae, use_container_width=True)
-
-                                # Claim-level charts
-                                claim_loss = pd.DataFrame()
-                                claim_counts = pd.DataFrame()
+                                # Claim-level visuals (if claim numbers present)
+                                claim_loss = pd.DataFrame(); claim_counts = pd.DataFrame()
                                 if claims_rows:
                                     claims_df = pd.concat(claims_rows, ignore_index=True)
                                     claim_loss = claims_df.groupby("claim_number", as_index=False)["loss"].sum().sort_values("loss", ascending=False).head(20)
                                     bar_claim_loss = alt.Chart(claim_loss).mark_bar().encode(
-                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("loss:Q", title="Loss"),
-                                        tooltip=["claim_number","loss"]
+                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("loss:Q", title="Loss"), tooltip=["claim_number","loss"]
                                     ).properties(title="Claim Number-wise Loss (Top 20)")
                                     st.altair_chart(bar_claim_loss, use_container_width=True)
-                                    claim_counts = claims_df.groupby("claim_number", as_index=False).size()
-                                    claim_counts = claim_counts.rename(columns={"size": "count"}).sort_values("count", ascending=False).head(20)
+                                    claim_counts = claims_df.groupby("claim_number", as_index=False).size().rename(columns={"size":"count"}).sort_values("count", ascending=False).head(20)
                                     bar_claim_counts = alt.Chart(claim_counts).mark_bar(color="#1f77b4").encode(
-                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("count:Q", title="Count"),
-                                        tooltip=["claim_number","count"]
+                                        x=alt.X("claim_number:N", sort='-y', title="Claim Number"), y=alt.Y("count:Q", title="Count"), tooltip=["claim_number","count"]
                                     ).properties(title="Claim Number Counts (Top 20)")
                                     st.altair_chart(bar_claim_counts, use_container_width=True)
                                 else:
                                     st.info("Claim-level charts not available (claim number column missing).")
-
-                                # Downloadable summary (Excel with multiple sheets)
+                                # Downloadable summary (Excel with corrected totals)
                                 try:
                                     buffer = io.BytesIO()
                                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
