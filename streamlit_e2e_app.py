@@ -586,6 +586,36 @@ def main():
                                 st.info("No data available for charts.")
                             else:
                                 lob_totals = pd.DataFrame(lob_rows).groupby("LOB", as_index=False).sum(numeric_only=True)
+                                # ===== Metric Tiles =====
+                                total_loss_all = float(lob_totals["Total Loss"].sum())
+                                colA, colB, colC = st.columns(3)
+                                with colA:
+                                    st.metric("Total Loss (All LOBs)", f"{total_loss_all:,.2f}")
+                                with colB:
+                                    # LOB-wise total loss as comma-separated summary
+                                    lob_str = ", ".join([f"{r.LOB}: {r['Total Loss']:,.2f}" for _, r in lob_totals.iterrows()])
+                                    st.metric("LOB-wise Total Loss", lob_str)
+                                with colC:
+                                    # Average Loss per LOB (Total Loss / number of claims per LOB)
+                                    avg_text = "N/A"
+                                    try:
+                                        if claims_rows:
+                                            claims_df_tmp = pd.concat(claims_rows, ignore_index=True)
+                                            counts = claims_df_tmp.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
+                                            merged_avg = lob_totals.merge(counts, left_on="LOB", right_on="lob", how="left").fillna({"count":0})
+                                            merged_avg["avg_loss_per_lob"] = merged_avg.apply(lambda r: (r["Total Loss"] / r["count"]) if r["count"] else 0.0, axis=1)
+                                            avg_text = ", ".join([f"{r.LOB}: {r['avg_loss_per_lob']:,.2f}" for _, r in merged_avg.iterrows()])
+                                    except Exception:
+                                        pass
+                                    st.metric("Average Loss per LOB", avg_text)
+                                # LOB-wise number of claims tile row
+                                if claims_rows:
+                                    claims_df_tiles = pd.concat(claims_rows, ignore_index=True)
+                                    lob_counts = claims_df_tiles.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
+                                    cols = st.columns(min(4, max(1, len(lob_counts))))
+                                    for i, row in enumerate(lob_counts.itertuples(index=False)):
+                                        with cols[i % len(cols)]:
+                                            st.metric(f"Claims ({row.lob})", f"{int(row.count):,}")
                                 st.markdown("### LOB-wise Totals")
                                 st.dataframe(lob_totals, use_container_width=True)
                                 # Pie: LOB-wise total loss
