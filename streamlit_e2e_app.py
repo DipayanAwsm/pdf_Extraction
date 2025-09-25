@@ -110,6 +110,29 @@ st.markdown("""
         border: 1px solid #ffeaa7;
         color: #856404;
     }
+    .metric-card {
+        padding: 1rem;
+        border-radius: 0.75rem;
+        border: 1px solid #e6e6e6;
+        background: linear-gradient(180deg, #ffffff 0%, #f7f9fc 100%);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        margin-bottom: 1rem;
+    }
+    .metric-title {
+        font-size: 0.9rem;
+        color: #6b7280;
+        margin-bottom: 0.35rem;
+    }
+    .metric-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #111827;
+        margin-bottom: 0.25rem;
+    }
+    .metric-subtle {
+        font-size: 0.8rem;
+        color: #6b7280;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -588,34 +611,77 @@ def main():
                                 lob_totals = pd.DataFrame(lob_rows).groupby("LOB", as_index=False).sum(numeric_only=True)
                                 # ===== Metric Tiles =====
                                 total_loss_all = float(lob_totals["Total Loss"].sum())
-                                colA, colB, colC = st.columns(3)
-                                with colA:
-                                    st.metric("Total Loss (All LOBs)", f"{total_loss_all:,.2f}")
-                                with colB:
-                                    # LOB-wise total loss as comma-separated summary
-                                    lob_str = ", ".join([f"{r.LOB}: {r['Total Loss']:,.2f}" for _, r in lob_totals.iterrows()])
-                                    st.metric("LOB-wise Total Loss", lob_str)
-                                with colC:
-                                    # Average Loss per LOB (Total Loss / number of claims per LOB)
-                                    avg_text = "N/A"
-                                    try:
-                                        if claims_rows:
-                                            claims_df_tmp = pd.concat(claims_rows, ignore_index=True)
-                                            counts = claims_df_tmp.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
-                                            merged_avg = lob_totals.merge(counts, left_on="LOB", right_on="lob", how="left").fillna({"count":0})
-                                            merged_avg["avg_loss_per_lob"] = merged_avg.apply(lambda r: (r["Total Loss"] / r["count"]) if r["count"] else 0.0, axis=1)
-                                            avg_text = ", ".join([f"{r.LOB}: {r['avg_loss_per_lob']:,.2f}" for _, r in merged_avg.iterrows()])
-                                    except Exception:
-                                        pass
-                                    st.metric("Average Loss per LOB", avg_text)
-                                # LOB-wise number of claims tile row
+                                # Small charts for cards
+                                mini_lob_loss = alt.Chart(lob_totals).mark_bar(size=20).encode(
+                                    x=alt.X("LOB:N", axis=None),
+                                    y=alt.Y("Total Loss:Q", axis=None),
+                                    color=alt.Color("LOB:N", legend=None),
+                                    tooltip=["LOB","Total Loss"]
+                                ).properties(height=80)
+                                # Average Loss per LOB data
+                                avg_text = "N/A"
+                                avg_df = pd.DataFrame()
+                                try:
+                                    if claims_rows:
+                                        claims_df_tmp = pd.concat(claims_rows, ignore_index=True)
+                                        counts = claims_df_tmp.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
+                                        merged_avg = lob_totals.merge(counts, left_on="LOB", right_on="lob", how="left").fillna({"count":0})
+                                        merged_avg["avg_loss_per_lob"] = merged_avg.apply(lambda r: (r["Total Loss"] / r["count"]) if r["count"] else 0.0, axis=1)
+                                        avg_df = merged_avg[["LOB","avg_loss_per_lob"]]
+                                        avg_text = ", ".join([f"{r.LOB}: {r['avg_loss_per_lob']:,.2f}" for _, r in merged_avg.iterrows()])
+                                except Exception:
+                                    pass
+                                mini_avg_loss = None
+                                if not avg_df.empty:
+                                    mini_avg_loss = alt.Chart(avg_df).mark_bar(size=20, color="#f59e0b").encode(
+                                        x=alt.X("LOB:N", axis=None),
+                                        y=alt.Y("avg_loss_per_lob:Q", axis=None),
+                                        tooltip=["LOB","avg_loss_per_lob"]
+                                    ).properties(height=80)
+                                # Claims count mini chart
+                                mini_claim_counts = None
+                                claim_counts_tiles = pd.DataFrame()
                                 if claims_rows:
                                     claims_df_tiles = pd.concat(claims_rows, ignore_index=True)
-                                    lob_counts = claims_df_tiles.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
-                                    cols = st.columns(min(4, max(1, len(lob_counts))))
-                                    for i, row in enumerate(lob_counts.itertuples(index=False)):
-                                        with cols[i % len(cols)]:
-                                            st.metric(f"Claims ({row.lob})", f"{int(row.count):,}")
+                                    claim_counts_tiles = claims_df_tiles.groupby("lob", as_index=False).size().rename(columns={"size":"count"})
+                                    mini_claim_counts = alt.Chart(claim_counts_tiles).mark_bar(size=20, color="#3b82f6").encode(
+                                        x=alt.X("lob:N", axis=None), y=alt.Y("count:Q", axis=None), tooltip=["lob","count"]
+                                    ).properties(height=80)
+                                # Render metric cards
+                                colA, colB, colC = st.columns(3)
+                                with colA:
+                                    st.markdown(f"""
+                                    <div class="metric-card">
+                                        <div class="metric-title">Total Loss (All LOBs)</div>
+                                        <div class="metric-value">{total_loss_all:,.2f}</div>
+                                        <div class="metric-subtle">Aggregated across all lines of business</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                with colB:
+                                    st.markdown("""
+                                    <div class="metric-card">
+                                        <div class="metric-title">LOB-wise Total Loss</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    st.altair_chart(mini_lob_loss, use_container_width=True)
+                                with colC:
+                                    st.markdown(f"""
+                                    <div class="metric-card">
+                                        <div class="metric-title">Average Loss per LOB</div>
+                                        <div class="metric-subtle">{avg_text}</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    if mini_avg_loss is not None:
+                                        st.altair_chart(mini_avg_loss, use_container_width=True)
+                                # LOB-wise number of claims metric card row
+                                if mini_claim_counts is not None:
+                                    st.markdown("""
+                                    <div class="metric-card">
+                                        <div class="metric-title">LOB-wise Number of Claims</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    st.altair_chart(mini_claim_counts, use_container_width=True)
+                                # Continue with detailed tables and bigger charts
                                 st.markdown("### LOB-wise Totals")
                                 st.dataframe(lob_totals, use_container_width=True)
                                 # Pie: LOB-wise total loss
