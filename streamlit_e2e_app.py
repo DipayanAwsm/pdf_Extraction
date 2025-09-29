@@ -149,6 +149,8 @@ if 'summary_expanded' not in st.session_state:
     st.session_state.summary_expanded = False
 
 
+# Functions
+
 def create_directories():
     """Create necessary directories"""
     backup_dir = Path("./backup")
@@ -268,11 +270,19 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         output_dir = results_dir / original_pdf_name.replace('.pdf', '')
         output_dir.mkdir(exist_ok=True)
         
+        # Hardcoded best-practice chunking parameters for LLM extractor
+        best_max_tokens = 6000
+        best_overlap_tokens = 400
+        best_chunk_sleep = 0.3
+        
         cmd = [
             "python", "text_lob_llm_extractor.py",
             str(text_file_path),
             "--config", "config.py",
-            "--out", str(output_dir)
+            "--out", str(output_dir),
+            "--max-tokens", str(best_max_tokens),
+            "--overlap-tokens", str(best_overlap_tokens),
+            "--chunk-sleep", str(best_chunk_sleep)
         ]
         
         result = subprocess.run(
@@ -498,7 +508,11 @@ def main():
                 status_text.text("Step 2/3: Processing text with LLM...")
                 progress_bar.progress(0.6)
                 
-                result_file_path, error = process_text_file(text_file_path, results_dir, uploaded_file.name)
+                result_file_path, error = process_text_file(
+                    text_file_path,
+                    results_dir,
+                    uploaded_file.name
+                )
                 
                 if not result_file_path:
                     st.session_state.processing_status = "Error"
