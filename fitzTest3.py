@@ -10,10 +10,19 @@ from pathlib import Path
 import argparse
 import time
 
+# Try enhanced extractor built on top of PyMuPDF
+try:
+    import pymupdf4llm  # optional improved text/markdown extractor
+    _HAS_PU4LLM = True
+except Exception:
+    pymupdf4llm = None
+    _HAS_PU4LLM = False
+
 
 def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
     """
-    Convert PDF to text using PyMuPDF (fitz)
+    Convert PDF to text using PyMuPDF (fitz). If available, use pymupdf4llm for
+    higher-quality extraction; otherwise fall back to per-page get_text().
     
     Args:
         pdf_path: Path to input PDF file
@@ -34,14 +43,28 @@ def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
         print(f"Processing PDF: {pdf_path}")
         print(f"Total pages: {len(doc)}")
         
-        # Extract text from all pages
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            page_text = page.get_text()
-            text_content += f"--- PAGE {page_num + 1} ---\n"
-            text_content += page_text
-            text_content += "\n\n"
-            print(f"Processed page {page_num + 1}")
+        # Prefer pymupdf4llm if available (handles layout, images, etc.)
+        if _HAS_PU4LLM:
+            try:
+                # Can accept a document or a file path; use document to avoid re-open
+                text_content = pymupdf4llm.to_markdown(doc)
+                if not isinstance(text_content, str) or not text_content.strip():
+                    # Fallback to plain text if markdown came back empty
+                    raise ValueError("Empty markdown from pymupdf4llm")
+                print("Used pymupdf4llm for extraction")
+            except Exception as _e:
+                print("pymupdf4llm failed, falling back to PyMuPDF get_text()")
+                text_content = ''
+        
+        # Fallback: standard per-page text extraction
+        if not text_content:
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                page_text = page.get_text()
+                text_content += f"--- PAGE {page_num + 1} ---\n"
+                text_content += page_text
+                text_content += "\n\n"
+                print(f"Processed page {page_num + 1}")
         
         doc.close()
         
@@ -75,7 +98,7 @@ def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert PDF to text using PyMuPDF")
+    parser = argparse.ArgumentParser(description="Convert PDF to text using PyMuPDF / pymupdf4llm")
     parser.add_argument("pdf_path", help="Path to input PDF file")
     parser.add_argument("--output", "-o", default="./tmp", help="Output directory for text file")
     
