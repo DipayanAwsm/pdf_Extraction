@@ -10,6 +10,7 @@ from datetime import datetime
 import fitz  # PyMuPDF - PDF processing library
 import altair as alt
 import io
+import re
 
 
 # Page configuration
@@ -264,7 +265,7 @@ def safe_finalize_result(src: Path, desired_dst: Path, retries: int = 6, wait_se
 
 
 def process_text_file(text_file_path, results_dir, original_pdf_name):
-    """Process text file using text_lob_llm_extractor.py"""
+    """Process text file page-by-page via external runner and consolidate results."""
     try:
         # Create output directory for this specific file
         output_dir = results_dir / original_pdf_name.replace('.pdf', '')
@@ -273,10 +274,10 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         # Hardcoded best-practice chunking parameters for LLM extractor
         best_max_tokens = 6000
         best_overlap_tokens = 400
-        best_chunk_sleep = 0.3
+        best_chunk_sleep = 0.6
         
         cmd = [
-            "python", "text_lob_llm_extractor.py",
+            "python", "pagewise_llm_runner.py",
             str(text_file_path),
             "--config", "config.py",
             "--out", str(output_dir),
@@ -289,29 +290,29 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=1200  # allow longer for multi-page processing
         )
         
         if result.returncode == 0:
-            # Small wait to ensure file handles are released by child process
-            time.sleep(0.8)
-            # Find the generated Excel file
-            excel_files = list(output_dir.glob("*.xlsx"))
-            if excel_files:
-                # Rename to original PDF name with robust finalize
-                result_file = output_dir / f"{original_pdf_name.replace('.pdf', '')}.xlsx"
-                finalized_path = safe_finalize_result(excel_files[0], result_file)
-                if finalized_path and Path(finalized_path).exists():
-                    return str(finalized_path), None
-                else:
-                    return None, "Failed to finalize result file due to file lock"
-            else:
-                return None, "No Excel file generated"
+            # Output path is emitted as SUCCESS:<file>
+            out_path = None
+            for line in (result.stdout or '').splitlines():
+                if line.startswith("SUCCESS:"):
+                    out_path = line.replace("SUCCESS:", "").strip()
+                    break
+            # Fallback search
+            if not out_path:
+                excel_files = list(output_dir.glob("*.xlsx"))
+                if excel_files:
+                    out_path = str(excel_files[0])
+            if out_path and Path(out_path).exists():
+                return out_path, None
+            return None, "Runner completed but final Excel not found"
         
-        return None, result.stderr
+        return None, result.stderr or "Runner failed"
         
     except subprocess.TimeoutExpired:
-        return None, "Text processing timed out"
+        return None, "Page-wise runner timed out"
     except Exception as e:
         return None, str(e)
 
