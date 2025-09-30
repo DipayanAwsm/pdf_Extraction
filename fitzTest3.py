@@ -18,11 +18,21 @@ except Exception:
     pymupdf4llm = None
     _HAS_PU4LLM = False
 
+# Try pdfalign if available
+try:
+    import pdfalign  # optional PDF alignment/text extractor
+    _HAS_PDFALIGN = True
+except Exception:
+    pdfalign = None
+    _HAS_PDFALIGN = False
+
 
 def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
     """
-    Convert PDF to text using PyMuPDF (fitz). If available, use pymupdf4llm for
-    higher-quality extraction; otherwise fall back to per-page get_text().
+    Convert PDF to text using, in order of preference:
+    - pdfalign (if installed)
+    - pymupdf4llm (if installed)
+    - PyMuPDF per-page get_text()
     
     Args:
         pdf_path: Path to input PDF file
@@ -36,37 +46,69 @@ def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # Open PDF document
-        doc = fitz.open(pdf_path)
         text_content = ''
-        
         print(f"Processing PDF: {pdf_path}")
-        print(f"Total pages: {len(doc)}")
         
-        # Prefer pymupdf4llm if available (handles layout, images, etc.)
-        if _HAS_PU4LLM:
+        # 1) Try pdfalign first if available
+        if _HAS_PDFALIGN:
             try:
-                # Can accept a document or a file path; use document to avoid re-open
-                text_content = pymupdf4llm.to_markdown(doc)
-                if not isinstance(text_content, str) or not text_content.strip():
-                    # Fallback to plain text if markdown came back empty
-                    raise ValueError("Empty markdown from pymupdf4llm")
-                print("Used pymupdf4llm for extraction")
+                # Some pdfalign builds expose extract_text(path) or similar API
+                # Attempt common signatures safely
+                if hasattr(pdfalign, 'extract_text'):
+                    text_content = pdfalign.extract_text(pdf_path)  # type: ignore[attr-defined]
+                elif hasattr(pdfalign, 'to_text'):
+                    text_content = pdfalign.to_text(pdf_path)  # type: ignore[attr-defined]
+                # If we got usable text, proceed
+                if isinstance(text_content, str) and text_content.strip():
+                    print("Used pdfalign for extraction")
+                else:
+                    text_content = ''
             except Exception as _e:
-                print("pymupdf4llm failed, falling back to PyMuPDF get_text()")
+                print("pdfalign extraction failed, trying other methods")
                 text_content = ''
         
-        # Fallback: standard per-page text extraction
+        # 2) If pdfalign not available or failed, try pymupdf4llm
         if not text_content:
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                page_text = page.get_text()
-                text_content += f"--- PAGE {page_num + 1} ---\n"
-                text_content += page_text
-                text_content += "\n\n"
-                print(f"Processed page {page_num + 1}")
+            try:
+                doc = fitz.open(pdf_path)
+            except Exception as e:
+                print(f"ERROR: Unable to open PDF: {e}")
+                return None
+            try:
+                if _HAS_PU4LLM:
+                    md = pymupdf4llm.to_markdown(doc)
+                    if isinstance(md, str) and md.strip():
+                        text_content = md
+                        print("Used pymupdf4llm for extraction")
+            except Exception:
+                text_content = ''
+            
+            # 3) Fallback to per-page get_text()
+            if not text_content:
+                try:
+                    print(f"Total pages: {len(doc)}")
+                    for page_num in range(len(doc)):
+                        page = doc.load_page(page_num)
+                        page_text = page.get_text()
+                        text_content += f"--- PAGE {page_num + 1} ---\n"
+                        text_content += page_text
+                        text_content += "\n\n"
+                        print(f"Processed page {page_num + 1}")
+                except Exception as e:
+                    print(f"ERROR: Error during PyMuPDF extraction: {e}")
+                    try:
+                        doc.close()
+                    except Exception:
+                        pass
+                    return None
+            try:
+                doc.close()
+            except Exception:
+                pass
         
-        doc.close()
+        if not text_content:
+            print("ERROR: No text extracted")
+            return None
         
         # Generate output filename
         pdf_name = Path(pdf_path).stem
@@ -98,7 +140,7 @@ def pdf_to_text(pdf_path: str, output_dir: str = "./tmp") -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert PDF to text using PyMuPDF / pymupdf4llm")
+    parser = argparse.ArgumentParser(description="Convert PDF to text (pdfalign/pymupdf4llm/PyMuPDF)")
     parser.add_argument("pdf_path", help="Path to input PDF file")
     parser.add_argument("--output", "-o", default="./tmp", help="Output directory for text file")
     
