@@ -25,6 +25,16 @@ CAMELOT_FLAVORS = ["lattice", "stream"]  # try both
 CAMELOT_PAGES = "all"
 
 # ==============================
+# Extractor Engine Selection
+# ==============================
+# Choose which extractor to use for page-wise processing.
+# - "claude"  -> uses AWS Bedrock Claude via text_lob_llm_extractor.py
+# - "openai"  -> uses OpenAI (or Azure OpenAI) via text_lob_openai_extractor.py
+# If not set or invalid, the app will default to "claude" unless OpenAI creds are present,
+# in which case it may auto-select "openai".
+EXTRACTOR_ENGINE = "claude"  # or "openai"
+
+# ==============================
 # OpenAI / Azure OpenAI settings
 # ==============================
 # For OpenAI

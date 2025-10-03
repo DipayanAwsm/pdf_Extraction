@@ -17,9 +17,13 @@ import pandas as pd
 
 def run_extractor_on_page(page_txt_path: Path, out_dir: Path, config_path: Path,
                           max_tokens: int = 6000, overlap_tokens: int = 400, chunk_sleep: float = 0.3,
-                          timeout_sec: int = 300) -> bool:
+                          timeout_sec: int = 300, engine: str = "claude") -> bool:
+    if engine.lower() == "openai":
+        script = "text_lob_openai_extractor.py"
+    else:
+        script = "text_lob_llm_extractor.py"
     cmd = [
-        "python", "text_lob_llm_extractor.py",
+        "python", script,
         str(page_txt_path),
         "--config", str(config_path),
         "--out", str(out_dir),
@@ -95,6 +99,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=6000, help="Max tokens per chunk for LLM")
     parser.add_argument("--overlap-tokens", type=int, default=400, help="Overlap tokens between chunks")
     parser.add_argument("--chunk-sleep", type=float, default=0.3, help="Sleep between chunks in seconds")
+    parser.add_argument("--engine", choices=["claude", "openai"], default="claude", help="Extractor engine to use")
     args = parser.parse_args()
 
     text_path = Path(args.text_path)
@@ -158,6 +163,7 @@ def main():
                 max_tokens=args["max_tokens"] if isinstance(args, dict) else args.max_tokens,
                 overlap_tokens=args["overlap_tokens"] if isinstance(args, dict) else args.overlap_tokens,
                 chunk_sleep=args["chunk_sleep"] if isinstance(args, dict) else args.chunk_sleep,
+                engine=args["engine"] if isinstance(args, dict) else args.engine,
             )
         except Exception:
             ok = False
