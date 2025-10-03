@@ -50,6 +50,31 @@ def consolidate_excels(per_page_root: Path, final_excel_path: Path) -> bool:
         return False
     try:
         with pd.ExcelWriter(final_excel_path, engine='openpyxl') as writer:
+            # Add README sheet first
+            readme_data = {
+                'Instruction': [
+                    '1. All AUTO, WC, GL data has been extracted from the PDF file',
+                    '2. You just need to pull the data from the respective sheets',
+                    '',
+                    'Sheet Structure:',
+                    '- AUTO_claims: Auto insurance claims data',
+                    '- WC_claims: Workers Compensation claims data', 
+                    '- GL_claims: General Liability claims data',
+                    '',
+                    'Data Fields Available:',
+                    '- Claim Number, Loss Date, Paid Loss, Reserves, ALAE',
+                    '- LOB-specific fields (BI/PD for GL, Indemnity/Medical for WC)',
+                    '',
+                    'Usage:',
+                    '- Each sheet contains structured claim data ready for analysis',
+                    '- Data is consolidated from all pages of the original PDF',
+                    '- Use standard Excel functions to analyze, filter, or export data'
+                ]
+            }
+            readme_df = pd.DataFrame(readme_data)
+            readme_df.to_excel(writer, sheet_name='README', index=False)
+            
+            # Add consolidated data sheets
             for sheet_name, df_list in aggregated.items():
                 try:
                     combined = pd.concat(df_list, ignore_index=True)

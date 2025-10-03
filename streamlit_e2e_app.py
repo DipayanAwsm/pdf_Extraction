@@ -265,7 +265,7 @@ def safe_finalize_result(src: Path, desired_dst: Path, retries: int = 6, wait_se
 
 
 def process_text_file(text_file_path, results_dir, original_pdf_name):
-    """Process text file page-by-page via external runner and consolidate results."""
+    """Process text file page-by-page using text_lob_llm_extractor.py and consolidate results."""
     try:
         # Create output directory for this specific file
         output_dir = results_dir / original_pdf_name.replace('.pdf', '')
@@ -274,45 +274,119 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         # Hardcoded best-practice chunking parameters for LLM extractor
         best_max_tokens = 6000
         best_overlap_tokens = 400
-        best_chunk_sleep = 0.6
+        best_chunk_sleep = 0.3
         
-        cmd = [
-            "python", "pagewise_llm_runner.py",
-            str(text_file_path),
-            "--config", "config.py",
-            "--out", str(output_dir),
-            "--max-tokens", str(best_max_tokens),
-            "--overlap-tokens", str(best_overlap_tokens),
-            "--chunk-sleep", str(best_chunk_sleep)
-        ]
+        # Read combined text and split by page markers inserted by fitzTest3.py
+        try:
+            with open(text_file_path, 'r', encoding='utf-8') as f:
+                full_text = f.read()
+        except Exception as e:
+            return None, f"Failed to read text file: {e}"
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=1200  # allow longer for multi-page processing
-        )
+        # Split on lines like --- PAGE N ---; keep order
+        parts = re.split(r"^--- PAGE\s+(\d+)\s+---\s*$", full_text, flags=re.MULTILINE)
+        # re.split -> [prefix, page_num1, content1, page_num2, content2, ...]
+        page_items = []
+        if len(parts) >= 3:
+            it = iter(parts)
+            _prefix = next(it, '')
+            for page_num_str, page_text in zip(it, it):
+                try:
+                    page_num = int(str(page_num_str).strip())
+                except Exception:
+                    page_num = None
+                page_text = str(page_text or '').strip()
+                if page_text:
+                    page_items.append((page_num, page_text))
+        else:
+            # No markers found; treat the whole as one page
+            single_text = full_text.strip()
+            if single_text:
+                page_items.append((1, single_text))
         
-        if result.returncode == 0:
-            # Output path is emitted as SUCCESS:<file>
-            out_path = None
-            for line in (result.stdout or '').splitlines():
-                if line.startswith("SUCCESS:"):
-                    out_path = line.replace("SUCCESS:", "").strip()
-                    break
-            # Fallback search
-            if not out_path:
-                excel_files = list(output_dir.glob("*.xlsx"))
-                if excel_files:
-                    out_path = str(excel_files[0])
-            if out_path and Path(out_path).exists():
-                return out_path, None
-            return None, "Runner completed but final Excel not found"
+        if not page_items:
+            return None, "No text content to process"
         
-        return None, result.stderr or "Runner failed"
+        # Temporary directory to hold per-page inputs/outputs
+        per_page_dir = output_dir / "per_page"
+        per_page_dir.mkdir(exist_ok=True)
+        
+        # Aggregation storage: sheet_name -> list of DataFrames
+        aggregated_sheets: dict[str, list[pd.DataFrame]] = {}
+        
+        # Process each page individually
+        for idx, (pg, ptext) in enumerate(page_items, start=1):
+            # Write page text to a temp file
+            page_label = f"page_{pg if pg is not None else idx}"
+            page_txt_path = per_page_dir / f"{page_label}.txt"
+            try:
+                with open(page_txt_path, 'w', encoding='utf-8') as pf:
+                    pf.write(ptext)
+            except Exception as e:
+                return None, f"Failed writing temp page text: {e}"
+            
+            # Output directory for this page
+            page_out_dir = per_page_dir / f"{page_label}_out"
+            page_out_dir.mkdir(exist_ok=True)
+            
+            # Build command for this page
+            cmd = [
+                "python", "text_lob_llm_extractor.py",
+                str(page_txt_path),
+                "--config", "config.py",
+                "--out", str(page_out_dir),
+                "--max-tokens", str(best_max_tokens),
+                "--overlap-tokens", str(best_overlap_tokens),
+                "--chunk-sleep", str(best_chunk_sleep)
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode != 0:
+                # Skip this page on error and continue others
+                continue
+            
+            time.sleep(0.3)
+            # Collect this page's Excel and load
+            page_excels = list(page_out_dir.glob("*.xlsx"))
+            if not page_excels:
+                continue
+            try:
+                page_excel = page_excels[0]
+                page_data = pd.read_excel(page_excel, sheet_name=None)
+                for sheet_name, df in page_data.items():
+                    if df is None or df.empty:
+                        continue
+                    aggregated_sheets.setdefault(sheet_name, []).append(df)
+            except Exception:
+                continue
+        
+        # After per-page processing, consolidate into one Excel
+        if not aggregated_sheets:
+            return None, "No per-page results produced"
+        
+        final_path = output_dir / f"{original_pdf_name.replace('.pdf', '')}.xlsx"
+        try:
+            with pd.ExcelWriter(final_path, engine='openpyxl') as writer:
+                for sheet_name, df_list in aggregated_sheets.items():
+                    try:
+                        combined = pd.concat(df_list, ignore_index=True)
+                    except Exception:
+                        combined = df_list[0]
+                    safe_sheet = str(sheet_name)[:31]
+                    combined.to_excel(writer, sheet_name=safe_sheet, index=False)
+        except Exception as e:
+            return None, f"Failed to write consolidated Excel: {e}"
+        
+        return str(final_path), None
         
     except subprocess.TimeoutExpired:
-        return None, "Page-wise runner timed out"
+        return None, "Text processing timed out"
     except Exception as e:
         return None, str(e)
 
