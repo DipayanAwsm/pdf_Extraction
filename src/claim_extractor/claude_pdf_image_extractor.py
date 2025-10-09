@@ -67,23 +67,12 @@ def pdf_pages_to_png_bytes(pdf_path: str, dpi: int = 220, first_page: int = None
 def call_claude_on_image(bedrock, model_id: str, png_bytes: bytes, page_num: int, total_pages: int) -> str:
     b64 = base64.b64encode(png_bytes).decode("utf-8")
     system = (
-        "You convert images of insurance claim reports into structured JSON tables. "
-        "Return STRICT JSON only. No markdown."
+        "You are an expert OCR assistant. Extract all text from this image accurately. "
+        "Preserve formatting, line breaks, and structure. Return only the extracted text."
     )
     user_text = (
-        f"Extract all tabular data from this page image. This is page {page_num} of {total_pages}.\n"
-        "Respond as a JSON array of table objects:\n"
-        "[ {\n"
-        "  \"table_name\": string,\n"
-        "  \"headers\": [string, ...],\n"
-        "  \"data\": [[string,...], ...],\n"
-        "  \"metadata\": {\n"
-        "     \"row_count\": number,\n"
-        "     \"column_count\": number,\n"
-        "     \"page\": number\n"
-        "  }\n"
-        "} ]\n"
-        "If no tables, return []."
+        f"Extract all text from this page image. This is page {page_num} of {total_pages}.\n"
+        "Return the text exactly as it appears, preserving line breaks and formatting."
     )
     body = {
         "anthropic_version": "bedrock-2023-05-31",
@@ -112,49 +101,35 @@ def call_claude_on_image(bedrock, model_id: str, png_bytes: bytes, page_num: int
     return content["content"][0]["text"]
 
 
-def parse_json_from_text(text: str) -> List[Dict[str, Any]]:
-    try:
-        start = text.find("["); end = text.rfind("]") + 1
-        if start != -1 and end > start:
-            return json.loads(text[start:end])
-    except Exception:
-        pass
-    return []
+def clean_text_response(text: str) -> str:
+    """Clean Claude's text response, removing any JSON artifacts."""
+    # Remove any potential JSON wrapper artifacts
+    text = text.strip()
+    # If it looks like JSON, try to extract the content
+    if text.startswith('{') and text.endswith('}'):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and 'text' in parsed:
+                return parsed['text']
+        except:
+            pass
+    return text
 
 
-def tables_to_excel(tables: List[Dict[str, Any]], excel_path: Path, pdf_name: str) -> None:
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        # summary sheet
-        summary_rows = []
-        for i, t in enumerate(tables):
-            headers = t.get("headers") or []
-            data = t.get("data") or []
-            meta = t.get("metadata") or {}
-            summary_rows.append({
-                "Sheet": f"Table_{i+1}",
-                "Table_Name": t.get("table_name", f"Table {i+1}"),
-                "Rows": len(data),
-                "Columns": len(headers),
-                "Page": meta.get("page"),
-            })
-        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
-
-        # per-table sheets
-        for i, t in enumerate(tables):
-            headers = t.get("headers") or []
-            data = t.get("data") or []
-            if headers and data:
-                df = pd.DataFrame(data, columns=headers)
-            else:
-                df = pd.DataFrame(data)
-            sheet = f"Table_{i+1}"
-            df.to_excel(writer, sheet_name=sheet[:31], index=False)
+def save_text_to_file(all_text: List[str], txt_path: Path) -> None:
+    """Save all extracted text to a single .txt file with page markers."""
+    content = []
+    for i, page_text in enumerate(all_text, 1):
+        content.append(f"--- PAGE {i} ---")
+        content.append(page_text)
+        content.append("")  # Empty line between pages
+    txt_path.write_text("\n".join(content), encoding="utf-8")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Send PDF pages directly to Claude (Bedrock) as images and extract tables")
+    ap = argparse.ArgumentParser(description="Send PDF pages directly to Claude (Bedrock) as images and extract text")
     ap.add_argument("pdf", help="Path to PDF file")
-    ap.add_argument("--out", default="claude_image_results", help="Output directory")
+    ap.add_argument("--out", default="claude_text_results", help="Output directory")
     ap.add_argument("--dpi", type=int, default=220, help="Image DPI for page renders")
     ap.add_argument("--first", type=int, default=None, help="First page to process (1-based)")
     ap.add_argument("--last", type=int, default=None, help="Last page to process (inclusive)")
@@ -173,32 +148,22 @@ def main():
 
     pages = pdf_pages_to_png_bytes(str(pdf_path), dpi=args.dpi, first_page=args.first, last_page=args.last)
     total_pages = len(pages)
-    all_tables: List[Dict[str, Any]] = []
+    all_text: List[str] = []
 
     for page_num, png_bytes in pages:
         try:
             text = call_claude_on_image(bedrock, cfg["model_id"], png_bytes, page_num, total_pages)
-            page_tables = parse_json_from_text(text)
-            # tag page in metadata if missing
-            for t in page_tables:
-                meta = t.setdefault("metadata", {})
-                meta.setdefault("page", page_num)
-            all_tables.extend(page_tables)
-            print(f"Page {page_num}: extracted {len(page_tables)} tables")
+            cleaned_text = clean_text_response(text)
+            all_text.append(cleaned_text)
+            print(f"Page {page_num}: extracted {len(cleaned_text)} characters")
         except Exception as e:
             print(f"WARN: Page {page_num} failed: {e}")
+            all_text.append(f"[Error extracting page {page_num}]")
 
-    # write outputs
-    json_path = out_dir / f"{base}_claude_image.json"
-    Path(json_path).write_text(json.dumps(all_tables, indent=2), encoding="utf-8")
-    print(f"Saved JSON: {json_path}")
-
-    if all_tables:
-        xlsx_path = out_dir / f"{base}_claude_image.xlsx"
-        tables_to_excel(all_tables, xlsx_path, pdf_path.name)
-        print(f"Saved Excel: {xlsx_path}")
-    else:
-        print("No tables extracted.")
+    # write output
+    txt_path = out_dir / f"{base}_claude_text.txt"
+    save_text_to_file(all_text, txt_path)
+    print(f"Saved text: {txt_path}")
 
 
 if __name__ == "__main__":
