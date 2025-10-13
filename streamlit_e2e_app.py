@@ -12,18 +12,6 @@ import altair as alt
 import io
 import re
 import importlib.util
-from src.claim_extractor.claude_pdf_image_extractor import (
-    load_config as claude_cfg_load,
-    setup_bedrock_client as claude_setup_client,
-    pdf_pages_to_png_bytes as claude_pages_to_png,
-    call_claude_on_image as claude_call_image,
-    clean_text_response as claude_clean_text,
-    save_text_to_file as claude_save_text,
-)
-from text_lob_llm_extractor import (
-    classify_lobs_multi as lob_classify_multi,
-    extract_fields_llm_chunked as lob_extract_chunked,
-)
 
 
 # Page configuration
@@ -584,159 +572,102 @@ def main():
                 st.markdown('<div class="error-box">❌ Processing failed with exception</div>', unsafe_allow_html=True)
                 st.error(f"Exception: {str(e)}")
 
-        # Alternative: Direct Claude OCR Text (no S3)
-        st.markdown('<h3 class="step-header">Optional: Extract Text with Claude (no S3)</h3>', unsafe_allow_html=True)
-        with st.expander("Claude OCR Text Extraction", expanded=False):
+        # Alternative: Scripted Claude OCR Text (no in-process LLM; writes to tmp/, then LOB extraction script on text)
+        st.markdown('<h3 class="step-header">Optional: OCR via Claude -> tmp, then LOB Extractor</h3>', unsafe_allow_html=True)
+        with st.expander("Run external scripts (no in-app LLM)", expanded=False):
             col_a, col_b, col_c = st.columns([1,1,2])
             with col_a:
                 dpi = st.number_input("DPI", value=220, min_value=150, max_value=600, step=10)
             with col_b:
-                page_range = st.text_input("Pages (e.g., 1-3 or blank for all)", value="")
+                page_range = st.text_input("Pages (e.g., 1-3 or blank)", value="")
             with col_c:
                 cfg_path = st.text_input("Config path", value="config.py")
 
-            if st.button("🧠 Extract Text via Claude", disabled=st.session_state.processing_status == "Processing"):
+            if st.button("🧠 Run Scripts", disabled=st.session_state.processing_status == "Processing"):
                 try:
                     st.session_state.processing_status = "Processing"
-                    with st.spinner("Calling Claude on page images..."):
-                        # Load creds
-                        cfg = claude_cfg_load(cfg_path)
-                        if not cfg or not cfg.get("access_key"):
-                            st.error("Missing Bedrock credentials. Update config.py or aws_config.json")
+                    with st.spinner("Step 1/2: Claude OCR to tmp ..."):
+                        # Build command for claude_pdf_image_extractor.py -> tmp text
+                        first_last_args = []
+                        pr = page_range.replace(" ", "")
+                        if pr:
+                            if "-" in pr:
+                                a, b = pr.split("-", 1)
+                                if a.strip():
+                                    first_last_args += ["--first", a.strip()]
+                                if b.strip():
+                                    first_last_args += ["--last", b.strip()]
+                            else:
+                                first_last_args += ["--first", pr, "--last", pr]
+
+                        tmp_txt_dir = Path("tmp")
+                        tmp_txt_dir.mkdir(exist_ok=True)
+                        # Output path is internal to the extractor, so we just ensure it writes into a known directory name
+                        # We will copy/move the produced file
+                        cmd1 = [
+                            "python", "src/claim_extractor/claude_pdf_image_extractor.py",
+                            str(backup_path), "--out", str(tmp_txt_dir), "--dpi", str(dpi), "--config", cfg_path
+                        ] + first_last_args
+                        res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=1200)
+                        if res1.returncode != 0:
                             st.session_state.processing_status = "Error"
-                        else:
-                            bedrock = claude_setup_client(cfg)
-                            # Resolve page bounds
-                            first_page = None; last_page = None
-                            if page_range.strip():
-                                try:
-                                    pr = page_range.replace(" ", "")
-                                    if "-" in pr:
-                                        a, b = pr.split("-", 1)
-                                        first_page = int(a) if a else None
-                                        last_page = int(b) if b else None
-                                    else:
-                                        first_page = int(pr)
-                                        last_page = int(pr)
-                                except Exception:
-                                    first_page = None; last_page = None
+                            st.error("Claude OCR script failed")
+                            st.text(res1.stderr)
+                            return
+                        # Find produced _claude_text.txt in tmp
+                        produced = list(tmp_txt_dir.glob(f"{backup_path.stem}_claude_text.txt"))
+                        if not produced:
+                            produced = list(tmp_txt_dir.glob("*_claude_text.txt"))
+                        if not produced:
+                            st.session_state.processing_status = "Error"
+                            st.error("Did not find extracted text file in tmp")
+                            st.text(res1.stdout)
+                            return
+                        txt_file = produced[0]
+                        st.success(f"OCR text ready: {txt_file}")
+                        st.text_area("Preview", value=(Path(txt_file).read_text(encoding='utf-8')[:8000]), height=300)
 
-                            # Render pages and call Claude
-                            pages = claude_pages_to_png(str(backup_path), dpi=dpi, first_page=first_page, last_page=last_page)
-                            total_pages = len(pages)
-                            collected_text = []
-                            prog = st.progress(0)
-                            for i, (pg_num, png_bytes) in enumerate(pages, start=1):
-                                try:
-                                    txt = claude_call_image(bedrock, cfg["model_id"], png_bytes, pg_num, total_pages)
-                                    cleaned = claude_clean_text(txt)
-                                    collected_text.append(cleaned)
-                                except Exception as e:
-                                    collected_text.append(f"[Error extracting page {pg_num}: {e}]")
-                                finally:
-                                    prog.progress(i/total_pages)
-
-                            # Save to results folder
-                            txt_dir = results_dir / "claude_text"; txt_dir.mkdir(exist_ok=True)
-                            txt_path = txt_dir / f"{backup_path.stem}_claude_text.txt"
-                            claude_save_text(collected_text, txt_path)
-                            st.success("Claude text extraction complete.")
-                            st.text_area("Preview", value=("\n\n".join(collected_text))[:10000], height=300)
-                            with open(txt_path, "rb") as f:
-                                st.download_button(
-                                    label="⬇️ Download Extracted Text",
-                                    data=f.read(),
-                                    file_name=txt_path.name,
-                                    mime="text/plain"
-                                )
-                            # LOB classification and field extraction
-                            full_text = "\n\n".join(collected_text)
-                            st.markdown('<h4 class="step-header">Classify LOB and Extract Fields</h4>', unsafe_allow_html=True)
-                            # Use Claude for classification/extraction via existing utilities
+                    with st.spinner("Step 2/2: Running text_lob_llm_extractor on the text file ..."):
+                        out_dir = Path("results") / backup_path.stem
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        cmd2 = [
+                            "python", "text_lob_llm_extractor.py",
+                            str(txt_file), "--config", cfg_path, "--out", str(out_dir)
+                        ]
+                        res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=1800)
+                        if res2.returncode != 0:
+                            st.session_state.processing_status = "Error"
+                            st.error("LOB extractor script failed")
+                            st.text(res2.stderr)
+                            return
+                        # Surface outputs to user
+                        excel_files = list(out_dir.glob("*.xlsx"))
+                        if excel_files:
+                            final_excel = excel_files[0]
+                            st.success(f"Extraction complete: {final_excel}")
                             try:
-                                lobs = lob_classify_multi(bedrock, cfg["model_id"], full_text[:20000])
-                            except Exception:
-                                lobs = ["AUTO"]
-                            st.write(f"Detected LoBs: {', '.join(lobs)}")
-
-                            # Chunked extraction per LoB
-                            from text_lob_llm_extractor import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS, DEFAULT_CHUNK_SLEEP
-                            per_lob_rows = {"AUTO": [], "GL": [], "WC": []}
-                            for lob in lobs:
-                                fields = lob_extract_chunked(
-                                    bedrock, cfg["model_id"], full_text, lob,
-                                    max_chars=DEFAULT_MAX_CHARS, overlap_chars=DEFAULT_OVERLAP_CHARS, per_chunk_sleep=DEFAULT_CHUNK_SLEEP,
-                                )
-                                # Flatten rows as in text_lob_llm_extractor.main
-                                if lob == 'AUTO':
-                                    for c in fields.get('claims', []):
-                                        per_lob_rows['AUTO'].append({
-                                            'evaluation_date': fields.get('evaluation_date',''),
-                                            'carrier': c.get('carrier','') or fields.get('carrier',''),
-                                            'claim_number': c.get('claim_number',''),
-                                            'loss_date': c.get('loss_date',''),
-                                            'paid_loss': c.get('paid_loss',''),
-                                            'reserve': c.get('reserve',''),
-                                            'alae': c.get('alae',''),
-                                        })
-                                elif lob in ('GENERAL LIABILITY','GL'):
-                                    for c in fields.get('claims', []):
-                                        per_lob_rows['GL'].append({
-                                            'evaluation_date': fields.get('evaluation_date',''),
-                                            'carrier': c.get('carrier','') or fields.get('carrier',''),
-                                            'claim_number': c.get('claim_number',''),
-                                            'loss_date': c.get('loss_date',''),
-                                            'bi_paid_loss': c.get('bi_paid_loss',''),
-                                            'pd_paid_loss': c.get('pd_paid_loss',''),
-                                            'bi_reserve': c.get('bi_reserve',''),
-                                            'pd_reserve': c.get('pd_reserve',''),
-                                            'alae': c.get('alae',''),
-                                        })
-                                elif lob == 'WC':
-                                    for c in fields.get('claims', []):
-                                        per_lob_rows['WC'].append({
-                                            'evaluation_date': fields.get('evaluation_date',''),
-                                            'carrier': c.get('carrier','') or fields.get('carrier',''),
-                                            'claim_number': c.get('claim_number',''),
-                                            'loss_date': c.get('loss_date',''),
-                                            'Indemnity_paid_loss': c.get('Indemnity_paid_loss',''),
-                                            'Medical_paid_loss': c.get('Medical_paid_loss',''),
-                                            'Indemnity_reserve': c.get('Indemnity_reserve',''),
-                                            'Medical_reserve': c.get('Medical_reserve',''),
-                                            'ALAE': c.get('ALAE',''),
-                                        })
-
-                            # Build DataFrames and download Excel
-                            auto_df = pd.DataFrame(per_lob_rows['AUTO']) if per_lob_rows['AUTO'] else pd.DataFrame()
-                            gl_df = pd.DataFrame(per_lob_rows['GL']) if per_lob_rows['GL'] else pd.DataFrame()
-                            wc_df = pd.DataFrame(per_lob_rows['WC']) if per_lob_rows['WC'] else pd.DataFrame()
-                            if not auto_df.empty:
-                                st.write("AUTO", auto_df)
-                            if not gl_df.empty:
-                                st.write("GL", gl_df)
-                            if not wc_df.empty:
-                                st.write("WC", wc_df)
-
-                            if not auto_df.empty or not gl_df.empty or not wc_df.empty:
-                                buf = io.BytesIO()
-                                with pd.ExcelWriter(buf, engine='openpyxl') as w:
-                                    if not auto_df.empty:
-                                        auto_df.to_excel(w, sheet_name='auto_claims', index=False)
-                                    if not gl_df.empty:
-                                        gl_df.to_excel(w, sheet_name='gl_claims', index=False)
-                                    if not wc_df.empty:
-                                        wc_df.to_excel(w, sheet_name='wc_claims', index=False)
-                                buf.seek(0)
+                                excel_data = pd.read_excel(final_excel, sheet_name=None)
+                                for sheet_name, df in excel_data.items():
+                                    with st.expander(f"{sheet_name}"):
+                                        st.dataframe(df, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Could not preview Excel: {e}")
+                            with open(final_excel, "rb") as f:
                                 st.download_button(
                                     label="⬇️ Download LOB Extract (Excel)",
-                                    data=buf,
-                                    file_name=f"{backup_path.stem}_lob_extract.xlsx",
+                                    data=f.read(),
+                                    file_name=final_excel.name,
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 )
-                            st.session_state.processing_status = "Complete"
+                        else:
+                            st.info("No Excel found from extractor.")
+                    st.session_state.processing_status = "Complete"
+                except subprocess.TimeoutExpired:
+                    st.session_state.processing_status = "Error"
+                    st.error("Timed out running scripts.")
                 except Exception as e:
                     st.session_state.processing_status = "Error"
-                    st.error(f"Claude OCR failed: {e}")
+                    st.error(f"Scripted flow failed: {e}")
         
         # Step 4: Results
         if st.session_state.processing_complete and st.session_state.result_file:
