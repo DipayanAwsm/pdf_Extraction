@@ -7,7 +7,6 @@ import pandas as pd
 from pathlib import Path
 import shutil
 from datetime import datetime
-import fitz  # PyMuPDF - PDF processing library
 import altair as alt
 import io
 import re
@@ -353,22 +352,7 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         return None, str(e)
 
 
-def preview_pdf(pdf_path):
-    """Generate a simple PDF preview using PyMuPDF (fitz)"""
-    try:
-        doc = fitz.open(pdf_path)  # PyMuPDF
-        
-        # Get first page for preview
-        page = doc.load_page(0)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # PyMuPDF 2x zoom
-        img_data = pix.tobytes("png")
-        
-        doc.close()
-        
-        return img_data
-    except Exception as e:
-        st.error(f"Error generating preview: {e}")
-        return None
+## Removed image preview processing to keep app free of image operations
 
 
 def _normalize_colname(name: str) -> str:
@@ -503,16 +487,7 @@ def main():
         
         st.markdown('<div class="success-box">✅ File uploaded to backup successfully!</div>', unsafe_allow_html=True)
         
-        # Step 2: Preview
-        st.markdown('<h2 class="step-header">Step 2: File Preview</h2>', unsafe_allow_html=True)
-        
-        if st.button("📄 Generate Preview"):
-            with st.spinner("Generating preview..."):
-                img_data = preview_pdf(backup_path)
-                if img_data:
-                    st.image(img_data, caption="PDF Preview (First Page)", use_column_width=True)
-                else:
-                    st.info("Preview not available. File will be processed normally.")
+        # Step 2 removed: image preview is disabled
         
         # Step 3: Processing
         st.markdown('<h2 class="step-header">Step 3: Process File</h2>', unsafe_allow_html=True)
