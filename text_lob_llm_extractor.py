@@ -83,28 +83,55 @@ def _extract_carrier_from_text(text: str) -> str:
 
 
 def _extract_carrier_from_filename(file_path: str) -> str:
-    """Attempt to infer carrier from the text file name (stem)."""
+    """Extract carrier name from filename with enhanced pattern matching."""
     import re
     p = Path(file_path)
-    stem = p.stem.replace('_', ' ').replace('-', ' ').replace('.', ' ')
-    # Try common corporate suffix pattern
-    m = re.search(r"\b([A-Z][A-Za-z0-9 &'.\-/]+(?:Insurance|Ins|Corp|Corporation|Company|Co|LLC|Inc))\b", stem, re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    # Try grabbing leading words before typical descriptors
+    stem = p.stem.replace('_', ' ').replace('-', ' ').replace('.', ' ').strip()
+    
+    # Pattern 1: Look for insurance company names with common suffixes
+    insurance_patterns = [
+        r"\b([A-Z][A-Za-z0-9 &'.\-/]+(?:Insurance|Ins|Corp|Corporation|Company|Co|LLC|Inc|Group|Mutual|Assurance|Underwriters))\b",
+        r"\b([A-Z][A-Za-z0-9 &'.\-/]+(?:Life|Casualty|Property|Marine|Fire|Auto|Motor))\b"
+    ]
+    
+    for pattern in insurance_patterns:
+        m = re.search(pattern, stem, re.IGNORECASE)
+        if m:
+            carrier = m.group(1).strip()
+            if len(carrier) > 2:  # Avoid single letters
+                return carrier
+    
+    # Pattern 2: Look for common insurance company name patterns
+    common_patterns = [
+        r"\b(State Farm|Allstate|Progressive|Geico|USAA|Farmers|Liberty Mutual|Travelers|Nationwide|American Family)\b",
+        r"\b(AIG|Chubb|Zurich|AXA|Allianz|MetLife|Prudential|New York Life|Northwestern Mutual)\b"
+    ]
+    
+    for pattern in common_patterns:
+        m = re.search(pattern, stem, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    
+    # Pattern 3: Extract words before common file descriptors
     tokens = stem.split()
     if tokens:
-        # Heuristic: up to first 3 tokens if they look like a name and not generic words
-        stop_words = {"loss", "run", "report", "claims", "claim", "extract", "extracted", "output", "input", "file"}
+        stop_words = {
+            "loss", "run", "report", "claims", "claim", "extract", "extracted", 
+            "output", "input", "file", "data", "export", "import", "processed",
+            "claude", "text", "ocr", "image", "pdf", "doc", "document"
+        }
         name_parts = []
         for t in tokens:
             if t.lower() in stop_words:
                 break
-            name_parts.append(t)
-            if len(name_parts) >= 3:
+            # Skip very short words and numbers
+            if len(t) > 1 and not t.isdigit():
+                name_parts.append(t)
+            if len(name_parts) >= 4:  # Limit to 4 words max
                 break
         if name_parts:
             return ' '.join(name_parts)
+    
     return ""
 
 
@@ -217,52 +244,15 @@ Content:\n{text}
 
 
 def extract_fields_llm(bedrock_client, model_id: str, text: str, lob: str, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> Dict:
+    from prompts import get_guidance, get_schema
+    
     lob = lob.upper()
-    if lob == 'AUTO':
-        schema = {
-            "evaluation_date": "string",
-            "carrier": "string",
-            "claims": [{
-                "claim_number": "string",
-                "loss_date": "string",
-                "paid_loss": "string",
-                "reserve": "string",
-                "alae": "string"
-            }]
-        }
-        guidance = "For AUTO: evaluation_date, carrier, claim_number, loss_date, paid_loss, reserve, alae."
-    elif lob in ('GENERAL LIABILITY','GL'):
-        schema = {
-            "evaluation_date": "string",
-            "carrier": "string",
-            "claims": [{
-                "claim_number": "string",
-                "loss_date": "string",
-                "bi_paid_loss": "string",
-                "pd_paid_loss": "string",
-                "bi_reserve": "string",
-                "pd_reserve": "string",
-                "alae": "string"
-            }]
-        }
-        guidance = "For GL: evaluation_date, carrier, bi_paid_loss, pd_paid_loss, bi_reserve, pd_reserve, alae."
+    if lob in ('GENERAL LIABILITY','GL'):
         lob = 'GL'
-    else:  # WC
-        schema = {
-            "evaluation_date": "string",
-            "carrier": "string",
-            "claims": [{
-                "claim_number": "string",
-                "loss_date": "string",
-                "Indemnity_paid_loss": "string",
-                "Medical_paid_loss": "string",
-                "Indemnity_reserve": "string",
-                "Medical_reserve": "string",
-                "ALAE": "string"
-            }]
-        }
-        guidance = "For WC: evaluation_date, carrier, Indemnity_paid_loss, Medical_paid_loss, Indemnity_reserve, Medical_reserve, ALAE."
-        lob = 'WC'
+    
+    # Get guidance and schema from external prompts.py file
+    guidance = get_guidance(lob)
+    schema = get_schema(lob)
 
     prompt = f"""
 Extract structured fields from the content for LoB={lob}.
@@ -554,9 +544,14 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_ch
                 max_chars=max_chars, overlap_chars=overlap_chars, per_chunk_sleep=per_chunk_sleep,
                 use_token_chunking=use_token_chunking, max_tokens=max_tokens, overlap_tokens=overlap_tokens
             )
-            # Ensure carrier is extracted - try multiple sources
-            carrier = fields.get('carrier', '') or _extract_carrier_from_text(text_content) or _extract_carrier_from_filename(text_file_path)
-            print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}'")
+            # Extract carrier from filename first, then fallback to text extraction
+            filename_carrier = _extract_carrier_from_filename(text_file_path)
+            text_carrier = _extract_carrier_from_text(text_content)
+            llm_carrier = fields.get('carrier', '')
+            
+            # Priority: filename > LLM extraction > text extraction
+            carrier = filename_carrier or llm_carrier or text_carrier
+            print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}' (from filename: '{filename_carrier}')")
             results.append({
                 'lob': lob,
                 'carrier': carrier,
@@ -632,7 +627,7 @@ def main():
                 for c in fields.get('claims', []):
                     auto_rows.append({
                         'evaluation_date': fields.get('evaluation_date',''),
-                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'carrier': carrier,  # Use filename-extracted carrier as primary
                         'claim_number': c.get('claim_number',''),
                         'loss_date': c.get('loss_date',''),
                         'paid_loss': c.get('paid_loss',''),
@@ -644,7 +639,7 @@ def main():
                 for c in fields.get('claims', []):
                     gl_rows.append({
                         'evaluation_date': fields.get('evaluation_date',''),
-                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'carrier': carrier,  # Use filename-extracted carrier as primary
                         'claim_number': c.get('claim_number',''),
                         'loss_date': c.get('loss_date',''),
                         'bi_paid_loss': c.get('bi_paid_loss',''),
@@ -658,7 +653,7 @@ def main():
                 for c in fields.get('claims', []):
                     wc_rows.append({
                         'evaluation_date': fields.get('evaluation_date',''),
-                        'carrier': c.get('carrier','') or carrier or fields.get('carrier',''),
+                        'carrier': carrier,  # Use filename-extracted carrier as primary
                         'claim_number': c.get('claim_number',''),
                         'loss_date': c.get('loss_date',''),
                         'Indemnity_paid_loss': c.get('Indemnity_paid_loss',''),
