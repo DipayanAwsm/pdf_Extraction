@@ -186,7 +186,7 @@ Content:\n{text}
     return best if scores[best] > 0 else "AUTO"
 
 
-def classify_lobs_multi(bedrock_client, model_id: str, text: str) -> List[str]:
+def classify_lobs_multi(bedrock_client, model_id: str, text: str, use_llm: bool = True) -> List[str]:
     prompt = f"""
 You are an insurance domain expert. Determine ALL Lines of Business (LoBs) present in the content.
 Choose any that apply from exactly these values: AUTO, GENERAL LIABILITY, WC.
@@ -201,33 +201,34 @@ If uncertain, include the most probable, but NEVER return an empty list.
 
 Content:\n{text}
 """
-    try:
-        resp = bedrock_client.invoke_model(
-            modelId=model_id,
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 200000,
-                "temperature": 0.0,
-                "messages": [{"role": "user", "content": prompt}],
-            })
-        )
-        body = json.loads(resp['body'].read())
-        content = body['content'][0]['text']
-        start = content.find('{'); end = content.rfind('}') + 1
-        if start != -1 and end > start:
-            obj = json.loads(content[start:end])
-            lobs = obj.get('lobs') or []
-            if isinstance(lobs, list):
-                cleaned = []
-                for v in lobs:
-                    s = str(v).strip().upper()
-                    if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in cleaned:
-                        cleaned.append(s)
-                if cleaned:
-                    return cleaned
-    except Exception:
-        pass
-    # Heuristic fallback on source text
+    if use_llm:
+        try:
+            resp = bedrock_client.invoke_model(
+                modelId=model_id,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 6000,
+                    "temperature": 0.0,
+                    "messages": [{"role": "user", "content": prompt}],
+                })
+            )
+            body = json.loads(resp['body'].read())
+            content = body['content'][0]['text']
+            start = content.find('{'); end = content.rfind('}') + 1
+            if start != -1 and end > start:
+                obj = json.loads(content[start:end])
+                lobs = obj.get('lobs') or []
+                if isinstance(lobs, list):
+                    cleaned = []
+                    for v in lobs:
+                        s = str(v).strip().upper()
+                        if s in {"AUTO","GENERAL LIABILITY","WC"} and s not in cleaned:
+                            cleaned.append(s)
+                    if cleaned:
+                        return cleaned
+        except Exception:
+            pass
+    # Heuristic detection on source text
     t = text.upper()
     found = []
     if any(k in t for k in [" AUTO ", " AUTOMOBILE", " VEHICLE", " VIN ", " COLLISION", " COMPREHENSIVE", " LICENSE PLATE", " TOW ", " RENTAL", " SUBROGATION"]):
@@ -343,7 +344,7 @@ def _chunk_text_for_llm(text: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_c
     return chunks
 
 
-def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS, per_chunk_sleep: float = DEFAULT_CHUNK_SLEEP, use_token_chunking: bool = False, max_tokens: int = DEFAULT_MAX_TOKENS, overlap_tokens: int = DEFAULT_OVERLAP_TOKENS) -> Dict:
+def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: str, max_chars: int = DEFAULT_MAX_CHARS, overlap_chars: int = DEFAULT_OVERLAP_CHARS, per_chunk_sleep: float = DEFAULT_CHUNK_SLEEP, use_token_chunking: bool = False, max_tokens: int = DEFAULT_MAX_TOKENS, overlap_tokens: int = DEFAULT_OVERLAP_TOKENS, fast: bool = False) -> Dict:
     """Run extract_fields_llm on overlapped chunks and merge results; duplicates are allowed."""
     chunks = _chunk_text_for_llm(
         text,
@@ -356,6 +357,22 @@ def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: st
     if not chunks:
         chunks = [text]
     merged = {"evaluation_date": "", "carrier": "", "claims": []}
+    if fast:
+        # Reduce chunks by merging to larger segments; cut overlap and sleep
+        merged: List[str] = []
+        acc = ""
+        for c in chunks:
+            if len(acc) + len(c) < (max_chars * 1.8):
+                acc += ("\n" if acc else "") + c
+            else:
+                merged.append(acc)
+                acc = c
+        if acc:
+            merged.append(acc)
+        chunks = merged if merged else chunks
+        overlap_chars = 0
+        per_chunk_sleep = min(0.1, per_chunk_sleep)
+
     for idx, part in enumerate(chunks):
         result = extract_fields_llm(bedrock_client, model_id, part, lob)
         if result.get('evaluation_date') and not merged['evaluation_date']:
@@ -366,7 +383,8 @@ def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: st
             # Keep duplicates as requested
             merged['claims'].extend(result['claims'])
         # Gentle pacing to avoid throttling
-        time.sleep(per_chunk_sleep)
+        if per_chunk_sleep > 0:
+            time.sleep(per_chunk_sleep)
     return merged
 
 
@@ -534,8 +552,8 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_ch
         with open(text_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text_content = f.read()
         print(f"Processing text file: {text_file_path} ({len(text_content)} chars)")
-        # Classify all LoBs present (use prefix for speed on huge files)
-        lobs = classify_lobs_multi(bedrock_client, model_id, text_content[:20000])
+        # Classify all LoBs present using heuristic fast path first
+        lobs = classify_lobs_multi(bedrock_client, model_id, text_content[:20000], use_llm=False)
         print(f"Detected LoBs: {lobs}")
         for lob in lobs:
             # Extract fields using chunked LLM for this LoB
@@ -543,7 +561,7 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_ch
                 bedrock_client, model_id, text_content, lob,
                 max_chars=max_chars, overlap_chars=overlap_chars, per_chunk_sleep=per_chunk_sleep,
                 use_token_chunking=use_token_chunking, max_tokens=max_tokens, overlap_tokens=overlap_tokens
-            )
+            , fast=True)
             # Extract carrier from filename first, then fallback to text extraction
             filename_carrier = _extract_carrier_from_filename(text_file_path)
             text_carrier = _extract_carrier_from_text(text_content)
