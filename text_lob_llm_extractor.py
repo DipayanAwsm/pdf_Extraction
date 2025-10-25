@@ -359,17 +359,17 @@ def extract_fields_llm_chunked(bedrock_client, model_id: str, text: str, lob: st
     merged = {"evaluation_date": "", "carrier": "", "claims": []}
     if fast:
         # Reduce chunks by merging to larger segments; cut overlap and sleep
-        merged: List[str] = []
+        merged_chunks: List[str] = []
         acc = ""
         for c in chunks:
             if len(acc) + len(c) < (max_chars * 1.8):
                 acc += ("\n" if acc else "") + c
             else:
-                merged.append(acc)
+                merged_chunks.append(acc)
                 acc = c
         if acc:
-            merged.append(acc)
-        chunks = merged if merged else chunks
+            merged_chunks.append(acc)
+        chunks = merged_chunks if merged_chunks else chunks
         overlap_chars = 0
         per_chunk_sleep = min(0.1, per_chunk_sleep)
 
