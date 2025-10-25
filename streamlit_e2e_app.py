@@ -547,8 +547,109 @@ def main():
                 st.markdown('<div class="error-box">❌ Processing failed with exception</div>', unsafe_allow_html=True)
                 st.error(f"Exception: {str(e)}")
 
-        # Alternative: Scripted Claude OCR Text (no in-process LLM; writes to tmp/, then LOB extraction script on text)
-        st.markdown('<h3 class="step-header">Optional: OCR via Claude -> tmp, then LOB Extractor</h3>', unsafe_allow_html=True)
+        # Alternative: Adaptive Table Extraction for Complex PDFs
+        st.markdown('<h3 class="step-header">Optional: Adaptive Table Extraction</h3>', unsafe_allow_html=True)
+        with st.expander("Smart extraction for complex table structures", expanded=False):
+            st.markdown("""
+            **Handles all table types:**
+            - ✅ Simple bordered tables
+            - ✅ Merged/spanned cells  
+            - ✅ Nested tables
+            - ✅ Page breaks & split tables
+            - ✅ Irregular spacing
+            - ✅ Tables without borders
+            - ✅ 5-200 pages
+            """)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                force_strategy = st.selectbox(
+                    "Extraction Strategy",
+                    ["auto", "camelot_tabula", "claude_text", "claude_image"],
+                    help="Auto = smart detection, others = force specific method"
+                )
+            with col2:
+                max_pages = st.number_input("Max Pages", value=50, min_value=5, max_value=200)
+            
+            if st.button("🧠 Analyze PDF Structure", disabled=st.session_state.processing_status == "Processing"):
+                try:
+                    st.session_state.processing_status = "Processing"
+                    with st.spinner("Analyzing PDF structure..."):
+                        # Run table type detector
+                        cmd_analyze = [
+                            "python", "src/claim_extractor/table_type_detector.py", str(backup_path)
+                        ]
+                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=60)
+                        
+                        if result.returncode == 0:
+                            st.success("PDF Analysis Complete")
+                            st.text_area("Analysis Results", value=result.stdout, height=200)
+                        else:
+                            st.warning("Analysis failed, proceeding with adaptive extraction")
+            
+            if st.button("🚀 Run Adaptive Extraction", disabled=st.session_state.processing_status == "Processing"):
+                try:
+                    st.session_state.processing_status = "Processing"
+                    with st.spinner("Running adaptive table extraction..."):
+                        # Run adaptive extractor
+                        cmd_extract = [
+                            "python", "src/claim_extractor/adaptive_table_extractor.py",
+                            str(backup_path), "--out", "adaptive_results", "--config", "config.py"
+                        ]
+                        if force_strategy != "auto":
+                            cmd_extract.extend(["--strategy", force_strategy])
+                        
+                        result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=1800)
+                        
+                        if result.returncode == 0:
+                            st.success("Adaptive extraction complete!")
+                            
+                            # Find and display results
+                            adaptive_dir = Path("adaptive_results")
+                            json_files = list(adaptive_dir.glob(f"{backup_path.stem}_*_tables.json"))
+                            excel_files = list(adaptive_dir.glob(f"{backup_path.stem}_*_tables.xlsx"))
+                            
+                            if json_files or excel_files:
+                                st.markdown("**Extracted Files:**")
+                                for file in json_files + excel_files:
+                                    st.write(f"📄 {file.name}")
+                                
+                                # Show Excel preview if available
+                                if excel_files:
+                                    try:
+                                        excel_data = pd.read_excel(excel_files[0], sheet_name=None)
+                                        for sheet_name, df in excel_data.items():
+                                            with st.expander(f"📊 {sheet_name}"):
+                                                st.dataframe(df, use_container_width=True)
+                                    except Exception as e:
+                                        st.warning(f"Could not preview Excel: {e}")
+                                
+                                # Download buttons
+                                for file in excel_files:
+                                    with open(file, "rb") as f:
+                                        st.download_button(
+                                            label=f"⬇️ Download {file.name}",
+                                            data=f.read(),
+                                            file_name=file.name,
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                        )
+                            else:
+                                st.warning("No results found")
+                        else:
+                            st.error("Adaptive extraction failed")
+                            st.text(result.stderr)
+                        
+                        st.session_state.processing_status = "Complete"
+                        
+                except subprocess.TimeoutExpired:
+                    st.session_state.processing_status = "Error"
+                    st.error("Extraction timed out")
+                except Exception as e:
+                    st.session_state.processing_status = "Error"
+                    st.error(f"Adaptive extraction failed: {e}")
+        
+        # Legacy: Scripted Claude OCR Text (no in-process LLM; writes to tmp/, then LOB extraction script on text)
+        st.markdown('<h3 class="step-header">Legacy: OCR via Claude -> tmp, then LOB Extractor</h3>', unsafe_allow_html=True)
         with st.expander("Run external scripts (no in-app LLM)", expanded=False):
             col_a, col_b, col_c = st.columns([1,1,2])
             with col_a:
