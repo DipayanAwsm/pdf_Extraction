@@ -156,7 +156,11 @@ class AdaptiveTableExtractor:
             return []
         
         # Convert PDF to text first
-        from .claude_text_extractor import extract_text_pagewise
+        try:
+            from .claude_text_extractor import extract_text_pagewise
+        except ImportError:
+            from claude_text_extractor import extract_text_pagewise
+        
         text, used_ocr = extract_text_pagewise(pdf_path, use_ocr_fallback=True)
         
         # Use Claude to extract structured data from text
