@@ -11,21 +11,21 @@ sys.path.append(str(Path(__file__).parent / "src" / "claim_extractor"))
 
 try:
     from adaptive_table_extractor import AdaptiveTableExtractor
-    print("✅ AdaptiveTableExtractor imported successfully")
+    print("[SUCCESS] AdaptiveTableExtractor imported successfully")
     
     from table_type_detector import TableTypeDetector
-    print("✅ TableTypeDetector imported successfully")
+    print("[SUCCESS] TableTypeDetector imported successfully")
     
     # Test basic functionality
     detector = TableTypeDetector()
-    print("✅ TableTypeDetector instantiated successfully")
+    print("[SUCCESS] TableTypeDetector instantiated successfully")
     
     extractor = AdaptiveTableExtractor()
-    print("✅ AdaptiveTableExtractor instantiated successfully")
+    print("[SUCCESS] AdaptiveTableExtractor instantiated successfully")
     
-    print("\n🎉 All imports working correctly!")
+    print("\n[COMPLETE] All imports working correctly!")
     
 except ImportError as e:
-    print(f"❌ Import error: {e}")
+    print(f"[ERROR] Import error: {e}")
 except Exception as e:
-    print(f"❌ Error: {e}")
+    print(f"[ERROR] Error: {e}")

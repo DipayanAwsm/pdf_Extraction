@@ -124,9 +124,9 @@ class AdaptiveTableExtractor:
             camelot_results = extract_with_camelot(pdf_path)
             if camelot_results:
                 results.extend(camelot_results)
-                print(f"✅ Camelot extracted {len(camelot_results)} records")
+                print(f"[SUCCESS] Camelot extracted {len(camelot_results)} records")
         except Exception as e:
-            print(f"⚠️ Camelot failed: {e}")
+            print(f"[WARNING] Camelot failed: {e}")
         
         # Try Tabula as fallback
         if not results:
@@ -134,16 +134,16 @@ class AdaptiveTableExtractor:
                 tabula_results = extract_with_tabula(pdf_path)
                 if tabula_results:
                     results.extend(tabula_results)
-                    print(f"✅ Tabula extracted {len(tabula_results)} records")
+                    print(f"[SUCCESS] Tabula extracted {len(tabula_results)} records")
             except Exception as e:
-                print(f"⚠️ Tabula failed: {e}")
+                print(f"[WARNING] Tabula failed: {e}")
         
         return results
     
     def extract_complex_tables_claude_text(self, pdf_path: str) -> List[Dict]:
         """Extract complex tables using Claude on OCR text."""
         if not self.bedrock:
-            print("❌ Bedrock client not available")
+            print("[ERROR] Bedrock client not available")
             return []
         
         # Convert PDF to text first
@@ -176,14 +176,14 @@ class AdaptiveTableExtractor:
             if start != -1 and end > start:
                 return json.loads(content[start:end])
         except Exception as e:
-            print(f"⚠️ Claude text extraction failed: {e}")
+            print(f"[WARNING] Claude text extraction failed: {e}")
         
         return []
     
     def extract_complex_tables_claude_image(self, pdf_path: str, max_pages: int = 50) -> List[Dict]:
         """Extract complex tables using Claude on page images."""
         if not self.bedrock:
-            print("❌ Bedrock client not available")
+            print("[ERROR] Bedrock client not available")
             return []
         
         # Process pages in batches to avoid memory issues
@@ -220,7 +220,7 @@ class AdaptiveTableExtractor:
                     pass
                     
             except Exception as e:
-                print(f"⚠️ Page {page_num} failed: {e}")
+                print(f"[WARNING] Page {page_num} failed: {e}")
         
         return all_tables
     
@@ -230,25 +230,25 @@ class AdaptiveTableExtractor:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"🔍 Analyzing PDF structure: {pdf_path.name}")
+        print(f" Analyzing PDF structure: {pdf_path.name}")
         analysis = self.detect_table_structure(str(pdf_path))
         strategy = self.select_extraction_strategy(analysis)
         
-        print(f"📊 Analysis: {analysis}")
-        print(f"🎯 Selected strategy: {strategy}")
+        print(f" Analysis: {analysis}")
+        print(f" Selected strategy: {strategy}")
         
         results = []
         
         if strategy == "camelot_tabula":
-            print("🔧 Using Camelot + Tabula for simple tables...")
+            print(" Using Camelot + Tabula for simple tables...")
             results = self.extract_simple_tables(str(pdf_path))
             
         elif strategy == "claude_text":
-            print("🧠 Using Claude on OCR text for medium complexity...")
+            print(" Using Claude on OCR text for medium complexity...")
             results = self.extract_complex_tables_claude_text(str(pdf_path))
             
         elif strategy == "claude_image":
-            print("🖼️ Using Claude on page images for high complexity...")
+            print(" Using Claude on page images for high complexity...")
             results = self.extract_complex_tables_claude_image(str(pdf_path))
         
         # Save results
@@ -262,10 +262,10 @@ class AdaptiveTableExtractor:
             excel_path = output_dir / f"{pdf_path.stem}_adaptive_tables.xlsx"
             self._save_to_excel(results, excel_path)
             
-            print(f"✅ Extracted {len(results)} tables")
-            print(f"💾 Saved: {json_path}, {excel_path}")
+            print(f"[SUCCESS] Extracted {len(results)} tables")
+            print(f" Saved: {json_path}, {excel_path}")
         else:
-            print("⚠️ No tables extracted")
+            print("[WARNING] No tables extracted")
         
         return {
             "strategy": strategy,
@@ -337,9 +337,9 @@ def main():
                 json.dump(results, f, indent=2)
             
             extractor._save_to_excel(results, excel_path)
-            print(f"✅ Saved: {json_path}, {excel_path}")
+            print(f"[SUCCESS] Saved: {json_path}, {excel_path}")
     
-    print("🎉 Extraction complete!")
+    print("[COMPLETE] Extraction complete!")
 
 
 if __name__ == "__main__":
