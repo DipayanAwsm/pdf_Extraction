@@ -1,37 +1,28 @@
 #!/usr/bin/env python3
 """
-Adaptive Table Extractor for Complex PDF Structures
-Handles: bordered tables, merged cells, nested tables, page breaks, irregular spacing, etc.
+Standalone Adaptive Table Extractor
+This version uses absolute imports and can be run directly from the project root.
 """
 
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 import pandas as pd
 
-# Import existing extractors
-try:
-    # Try relative imports first (when used as module)
-    from .camelot_extractor import extract_with_camelot
-    from .tabula_extractor import extract_with_tabula
-    from .claude_pdf_image_extractor import (
-        load_config, setup_bedrock_client, pdf_pages_to_png_bytes, 
-        call_claude_on_image, clean_text_response, save_text_to_file
-    )
-except ImportError:
-    # Fallback to absolute imports (when run as standalone script)
-    import sys
-    from pathlib import Path
-    sys.path.append(str(Path(__file__).parent))
-    
-    from camelot_extractor import extract_with_camelot
-    from tabula_extractor import extract_with_tabula
-    from claude_pdf_image_extractor import (
-        load_config, setup_bedrock_client, pdf_pages_to_png_bytes, 
-        call_claude_on_image, clean_text_response, save_text_to_file
-    )
+# Add project root to path
+project_root = Path(__file__).parent
+sys.path.append(str(project_root))
+
+# Import from project modules
+from src.claim_extractor.camelot_extractor import extract_with_camelot
+from src.claim_extractor.tabula_extractor import extract_with_tabula
+from src.claim_extractor.claude_pdf_image_extractor import (
+    load_config, setup_bedrock_client, pdf_pages_to_png_bytes, 
+    call_claude_on_image, clean_text_response, save_text_to_file
+)
 
 
 class AdaptiveTableExtractor:
@@ -156,7 +147,7 @@ class AdaptiveTableExtractor:
             return []
         
         # Convert PDF to text first
-        from .claude_text_extractor import extract_text_pagewise
+        from src.claim_extractor.claude_text_extractor import extract_text_pagewise
         text, used_ocr = extract_text_pagewise(pdf_path, use_ocr_fallback=True)
         
         # Use Claude to extract structured data from text
@@ -312,7 +303,7 @@ class AdaptiveTableExtractor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Adaptive table extractor for complex PDF structures")
+    parser = argparse.ArgumentParser(description="Standalone adaptive table extractor for complex PDF structures")
     parser.add_argument("pdf", help="Path to PDF file")
     parser.add_argument("--out", default="adaptive_results", help="Output directory")
     parser.add_argument("--config", default="config.py", help="Config file path")
