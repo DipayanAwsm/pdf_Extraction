@@ -586,6 +586,12 @@ def main():
                             st.text_area("Analysis Results", value=result.stdout, height=200)
                         else:
                             st.warning("Analysis failed, proceeding with adaptive extraction")
+                except subprocess.TimeoutExpired:
+                    st.session_state.processing_status = "Error"
+                    st.error("PDF analysis timed out")
+                except Exception as e:
+                    st.session_state.processing_status = "Error"
+                    st.error(f"PDF analysis failed: {e}")
             
             if st.button("🚀 Run Adaptive Extraction", disabled=st.session_state.processing_status == "Processing"):
                 try:
