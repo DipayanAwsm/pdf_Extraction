@@ -188,7 +188,7 @@ class AdaptiveTableExtractor:
         
         # Process pages in batches to avoid memory issues
         all_tables = []
-        pages = pdf_pages_to_png_bytes(pdf_path, dpi=220, first_page=1, last_page=min(max_pages, 50))
+        pages = pdf_pages_to_png_bytes(pdf_path, dpi=150, first_page=1, last_page=min(max_pages, 50))
         
         for page_num, png_bytes in pages:
             try:
@@ -220,7 +220,14 @@ class AdaptiveTableExtractor:
                     pass
                     
             except Exception as e:
-                print(f"[WARNING] Page {page_num} failed: {e}")
+                error_msg = str(e)
+                if "Validation exception" in error_msg:
+                    print(f"[WARNING] Page {page_num} failed: Claude API validation error - image may be too large or request malformed")
+                    print(f"[WARNING] Try reducing DPI or using a different model")
+                elif "malformed input request" in error_msg:
+                    print(f"[WARNING] Page {page_num} failed: Malformed request - check AWS credentials and model ID")
+                else:
+                    print(f"[WARNING] Page {page_num} failed: {e}")
         
         return all_tables
     
