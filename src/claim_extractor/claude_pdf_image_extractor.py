@@ -55,7 +55,12 @@ def setup_bedrock_client(cfg: dict):
 
 
 def pdf_pages_to_png_bytes(pdf_path: str, dpi: int = 220, first_page: int = None, last_page: int = None) -> List[Tuple[int, bytes]]:
-    images = convert_from_path(pdf_path, dpi=dpi, first_page=first_page, last_page=last_page)
+    # If no page range specified, process all pages
+    if first_page is None and last_page is None:
+        images = convert_from_path(pdf_path, dpi=dpi)
+    else:
+        images = convert_from_path(pdf_path, dpi=dpi, first_page=first_page, last_page=last_page)
+    
     out: List[Tuple[int, bytes]] = []
     for idx, pil_img in enumerate(images, start=first_page or 1):
         buf = io.BytesIO()
@@ -144,16 +149,23 @@ def main():
 
     pages = pdf_pages_to_png_bytes(str(pdf_path), dpi=args.dpi, first_page=args.first, last_page=args.last)
     total_pages = len(pages)
+    print(f"Processing {total_pages} pages from PDF: {pdf_path.name}")
+    if args.first or args.last:
+        print(f"Page range: {args.first or 1} to {args.last or 'end'}")
+    else:
+        print("Processing ALL pages")
+    
     all_text: List[str] = []
 
     for page_num, png_bytes in pages:
         try:
+            print(f"Processing page {page_num}/{total_pages}...")
             text = call_claude_on_image(bedrock, cfg["model_id"], png_bytes, page_num, total_pages)
             cleaned_text = clean_text_response(text)
             all_text.append(cleaned_text)
-            print(f"Page {page_num}: extracted {len(cleaned_text)} characters")
+            print(f"✅ Page {page_num}: extracted {len(cleaned_text)} characters")
         except Exception as e:
-            print(f"WARN: Page {page_num} failed: {e}")
+            print(f"❌ Page {page_num} failed: {e}")
             all_text.append(f"[Error extracting page {page_num}]")
 
     # write output

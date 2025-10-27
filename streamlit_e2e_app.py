@@ -699,7 +699,8 @@ def main():
             with col_a:
                 dpi = st.number_input("DPI", value=220, min_value=150, max_value=600, step=10)
             with col_b:
-                page_range = st.text_input("Pages (e.g., 1-3 or blank)", value="")
+                page_range = st.text_input("Pages (e.g., 1-3 or blank for ALL pages)", value="", 
+                                         help="Leave blank to process all pages. Use format like '1-5' for specific range.")
             with col_c:
                 cfg_path = st.text_input("Config path", value="config.py")
 
@@ -728,12 +729,20 @@ def main():
                             PYTHON_CMD, "src/claim_extractor/claude_pdf_image_extractor.py",
                             str(backup_path), "--out", str(tmp_txt_dir), "--dpi", str(dpi), "--config", cfg_path
                         ] + first_last_args
+                        # Show command being run
+                        st.text(f"Command: {' '.join(cmd1)}")
+                        
                         res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=OCR_TIMEOUT)
                         if res1.returncode != 0:
                             st.session_state.processing_status = "Error"
                             st.error("Claude OCR script failed")
-                            st.text(res1.stderr)
+                            st.text(f"Error: {res1.stderr}")
+                            st.text(f"Output: {res1.stdout}")
                             return
+                        
+                        # Show processing info
+                        if res1.stdout:
+                            st.text(f"Processing output: {res1.stdout}")
                         # Find produced _claude_text.txt in tmp
                         produced = list(tmp_txt_dir.glob(f"{backup_path.stem}_claude_text.txt"))
                         if not produced:
