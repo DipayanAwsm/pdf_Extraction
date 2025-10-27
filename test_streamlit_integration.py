@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Configuration
+PYTHON_CMD = "python"  # Change to "py" on Windows if needed
+CONFIG_FILE = "config.py"  # Change to your config file path if needed
+
 def test_standalone_extractor():
     """Test the standalone adaptive table extractor."""
     
@@ -22,8 +26,8 @@ def test_standalone_extractor():
     
     # Test command (same as Streamlit would use)
     cmd = [
-        "python", "adaptive_table_extractor_standalone.py",
-        sample_pdf, "--out", "test_adaptive_results", "--config", "config.py"
+        PYTHON_CMD, "adaptive_table_extractor_standalone.py",
+        sample_pdf, "--out", "test_adaptive_results", "--config", CONFIG_FILE
     ]
     
     print(f"Command: {' '.join(cmd)}")

@@ -12,6 +12,22 @@ import io
 import re
 import importlib.util
 
+# Load configuration
+try:
+    from streamlit_config import (
+        PYTHON_CMD, CONFIG_FILE, ANALYSIS_TIMEOUT, EXTRACTION_TIMEOUT,
+        OCR_TIMEOUT, LOB_TIMEOUT, SHOW_DEBUG_INFO, SHOW_COMMAND_OUTPUT
+    )
+except ImportError:
+    # Fallback configuration if streamlit_config.py doesn't exist
+    PYTHON_CMD = "python"  # Change to "py" on Windows if needed
+    CONFIG_FILE = "config.py"  # Change to your config file path if needed
+    ANALYSIS_TIMEOUT = 60
+    EXTRACTION_TIMEOUT = 1800
+    OCR_TIMEOUT = 1200
+    LOB_TIMEOUT = 1800
+    SHOW_DEBUG_INFO = True
+    SHOW_COMMAND_OUTPUT = True
 
 # Page configuration
 st.set_page_config(
@@ -211,13 +227,13 @@ def save_to_backup(uploaded_file, backup_dir):
 def convert_pdf_to_text(pdf_path, tmp_dir):
     """Convert PDF to text using fitzTest3.py. Always return (path, error)."""
     try:
-        cmd = ["python", "fitzTest3.py", str(pdf_path), "--output", str(tmp_dir)]
+        cmd = [PYTHON_CMD, "fitzTest3.py", str(pdf_path), "--output", str(tmp_dir)]
         
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=120  # 2 minute timeout
+            timeout=OCR_TIMEOUT  # OCR processing timeout
         )
         
         if result.returncode == 0:
@@ -311,7 +327,7 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
         engine = _determine_engine_from_config("config.py")
         
         cmd = [
-            "python", "pagewise_llm_runner.py",
+            PYTHON_CMD, "pagewise_llm_runner.py",
             str(text_file_path),
             "--config", "config.py",
             "--out", str(output_dir),
@@ -325,7 +341,7 @@ def process_text_file(text_file_path, results_dir, original_pdf_name):
             cmd,
             capture_output=True,
             text=True,
-            timeout=1200  # allow longer for multi-page processing
+            timeout=EXTRACTION_TIMEOUT  # allow longer for multi-page processing
         )
         
         if result.returncode == 0:
@@ -577,9 +593,9 @@ def main():
                     with st.spinner("Analyzing PDF structure..."):
                         # Run table type detector (using standalone version)
                         cmd_analyze = [
-                            "python", "src/claim_extractor/table_type_detector.py", str(backup_path)
+                            PYTHON_CMD, "src/claim_extractor/table_type_detector.py", str(backup_path)
                         ]
-                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=60)
+                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=ANALYSIS_TIMEOUT)
                         
                         if result.returncode == 0:
                             st.success("PDF Analysis Complete")
@@ -599,18 +615,19 @@ def main():
                     with st.spinner("Running adaptive table extraction..."):
                         # Run adaptive extractor (using standalone version to avoid import issues)
                         cmd_extract = [
-                            "python", "adaptive_table_extractor_standalone.py",
-                            str(backup_path), "--out", "adaptive_results", "--config", "config.py"
+                            PYTHON_CMD, "adaptive_table_extractor_standalone.py",
+                            str(backup_path), "--out", "adaptive_results", "--config", CONFIG_FILE
                         ]
                         if force_strategy != "auto":
                             cmd_extract.extend(["--strategy", force_strategy])
                         
-                        result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=1800)
+                        result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=EXTRACTION_TIMEOUT)
                         
                         # Debug information
-                        st.text(f"Command: {' '.join(cmd_extract)}")
-                        st.text(f"Return code: {result.returncode}")
-                        if result.stdout:
+                        if SHOW_DEBUG_INFO:
+                            st.text(f"Command: {' '.join(cmd_extract)}")
+                            st.text(f"Return code: {result.returncode}")
+                        if SHOW_COMMAND_OUTPUT and result.stdout:
                             st.text(f"Output: {result.stdout}")
                         if result.stderr:
                             st.text(f"Error: {result.stderr}")
@@ -708,10 +725,10 @@ def main():
                         # Output path is internal to the extractor, so we just ensure it writes into a known directory name
                         # We will copy/move the produced file
                         cmd1 = [
-                            "python", "src/claim_extractor/claude_pdf_image_extractor.py",
+                            PYTHON_CMD, "src/claim_extractor/claude_pdf_image_extractor.py",
                             str(backup_path), "--out", str(tmp_txt_dir), "--dpi", str(dpi), "--config", cfg_path
                         ] + first_last_args
-                        res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=1200)
+                        res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=OCR_TIMEOUT)
                         if res1.returncode != 0:
                             st.session_state.processing_status = "Error"
                             st.error("Claude OCR script failed")
@@ -734,10 +751,10 @@ def main():
                         out_dir = Path("results") / backup_path.stem
                         out_dir.mkdir(parents=True, exist_ok=True)
                         cmd2 = [
-                            "python", "text_lob_llm_extractor.py",
+                            PYTHON_CMD, "text_lob_llm_extractor.py",
                             str(txt_file), "--config", cfg_path, "--out", str(out_dir)
                         ]
-                        res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=1800)
+                        res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=LOB_TIMEOUT)
                         if res2.returncode != 0:
                             st.session_state.processing_status = "Error"
                             st.error("LOB extractor script failed")

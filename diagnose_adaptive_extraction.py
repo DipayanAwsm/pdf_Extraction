@@ -7,6 +7,10 @@ import sys
 import subprocess
 from pathlib import Path
 
+# Configuration
+PYTHON_CMD = "python"  # Change to "py" on Windows if needed
+CONFIG_FILE = "config.py"  # Change to your config file path if needed
+
 def check_dependencies():
     """Check if all required dependencies are installed."""
     print("=== Checking Dependencies ===")
@@ -106,8 +110,8 @@ def test_standalone_extractor():
         return False
     
     cmd = [
-        "python", "adaptive_table_extractor_standalone.py",
-        sample_pdf, "--out", "test_diagnostic_results", "--config", "config.py"
+        PYTHON_CMD, "adaptive_table_extractor_standalone.py",
+        sample_pdf, "--out", "test_diagnostic_results", "--config", CONFIG_FILE
     ]
     
     print(f"Running: {' '.join(cmd)}")
