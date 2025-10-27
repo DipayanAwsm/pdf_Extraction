@@ -163,9 +163,9 @@ def main():
             text = call_claude_on_image(bedrock, cfg["model_id"], png_bytes, page_num, total_pages)
             cleaned_text = clean_text_response(text)
             all_text.append(cleaned_text)
-            print(f"✅ Page {page_num}: extracted {len(cleaned_text)} characters")
+            print(f"[SUCCESS] Page {page_num}: extracted {len(cleaned_text)} characters")
         except Exception as e:
-            print(f"❌ Page {page_num} failed: {e}")
+            print(f"[ERROR] Page {page_num} failed: {e}")
             all_text.append(f"[Error extracting page {page_num}]")
 
     # write output
