@@ -51,7 +51,7 @@ def setup_bedrock_client(cfg: dict):
         aws_session_token=cfg.get("session_token"),
         region_name=cfg.get("region", "us-east-1"),
     )
-    return session.client("bedrock-runtime",veify=False)
+    return session.client("bedrock-runtime",verify=False)
 
 
 def pdf_pages_to_png_bytes(pdf_path: str, dpi: int = 220, first_page: int = None, last_page: int = None) -> List[Tuple[int, bytes]]:
