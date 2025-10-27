@@ -60,7 +60,7 @@ def test_bedrock_connection():
         )
         
         # Test with a simple request
-        test_prompt = "Hello, this is a test message."
+        test_prompt = "Hello, this is a test message. Please respond with 'Test successful'."
         
         response = bedrock.invoke_model(
             modelId=config.MODEL_ID,
@@ -71,6 +71,10 @@ def test_bedrock_connection():
                 "messages": [{"role": "user", "content": test_prompt}]
             })
         )
+        
+        # Check response
+        content = json.loads(response["body"].read())["content"][0]["text"]
+        print(f"✅ Test response: {content[:100]}...")
         
         print("✅ Bedrock connection successful")
         return True

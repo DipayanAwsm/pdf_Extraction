@@ -51,7 +51,7 @@ def setup_bedrock_client(cfg: dict):
         aws_session_token=cfg.get("session_token"),
         region_name=cfg.get("region", "us-east-1"),
     )
-    return session.client("bedrock-runtime")
+    return session.client("bedrock-runtime",veify=False)
 
 
 def pdf_pages_to_png_bytes(pdf_path: str, dpi: int = 220, first_page: int = None, last_page: int = None) -> List[Tuple[int, bytes]]:
@@ -66,20 +66,16 @@ def pdf_pages_to_png_bytes(pdf_path: str, dpi: int = 220, first_page: int = None
 
 def call_claude_on_image(bedrock, model_id: str, png_bytes: bytes, page_num: int, total_pages: int) -> str:
     b64 = base64.b64encode(png_bytes).decode("utf-8")
-    system = (
-        "You are an expert OCR assistant. Extract all text from this image accurately. "
-        "Preserve formatting, line breaks, and structure. Return only the extracted text."
-    )
     user_text = (
-        f"Extract all text from this page image. This is page {page_num} of {total_pages}.\n"
-        "Return the text exactly as it appears, preserving line breaks and formatting."
+        f"You are an expert OCR assistant. Extract all text from this page image accurately. "
+        f"This is page {page_num} of {total_pages}.\n"
+        f"Preserve formatting, line breaks, and structure. Return only the extracted text exactly as it appears."
     )
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 4000,
         "temperature": 0.0,
         "messages": [
-            {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": [
