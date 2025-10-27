@@ -575,7 +575,7 @@ def main():
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Analyzing PDF structure..."):
-                        # Run table type detector
+                        # Run table type detector (using standalone version)
                         cmd_analyze = [
                             "python", "src/claim_extractor/table_type_detector.py", str(backup_path)
                         ]
@@ -597,15 +597,23 @@ def main():
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Running adaptive table extraction..."):
-                        # Run adaptive extractor
+                        # Run adaptive extractor (using standalone version to avoid import issues)
                         cmd_extract = [
-                            "python", "src/claim_extractor/adaptive_table_extractor.py",
+                            "python", "adaptive_table_extractor_standalone.py",
                             str(backup_path), "--out", "adaptive_results", "--config", "config.py"
                         ]
                         if force_strategy != "auto":
                             cmd_extract.extend(["--strategy", force_strategy])
                         
                         result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=1800)
+                        
+                        # Debug information
+                        st.text(f"Command: {' '.join(cmd_extract)}")
+                        st.text(f"Return code: {result.returncode}")
+                        if result.stdout:
+                            st.text(f"Output: {result.stdout}")
+                        if result.stderr:
+                            st.text(f"Error: {result.stderr}")
                         
                         if result.returncode == 0:
                             st.success("Adaptive extraction complete!")
@@ -643,7 +651,20 @@ def main():
                                 st.warning("No results found")
                         else:
                             st.error("Adaptive extraction failed")
-                            st.text(result.stderr)
+                            st.text(f"Return code: {result.returncode}")
+                            if result.stdout:
+                                st.text(f"Output: {result.stdout}")
+                            if result.stderr:
+                                st.text(f"Error details: {result.stderr}")
+                            
+                            # Show troubleshooting tips
+                            st.markdown("**Troubleshooting Tips:**")
+                            st.markdown("""
+                            - Check if `config.py` exists and has valid AWS credentials
+                            - Ensure all dependencies are installed: `pip install -r requirements.txt`
+                            - Try running the command manually in terminal to see detailed error
+                            - Check if the PDF file is valid and not corrupted
+                            """)
                         
                         st.session_state.processing_status = "Complete"
                         
