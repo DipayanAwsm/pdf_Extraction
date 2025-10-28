@@ -72,7 +72,7 @@ def display_logo():
     else:
         # Fallback to text-based logo if no image found
         display_text_logo()
-        st.sidebar.info("💡 Add your logo to the 'logo' folder (logo.png, logo.jpg, etc.)")
+        st.sidebar.info("Add your logo to the 'logo' folder (logo.png, logo.jpg, etc.)")
 
 def display_text_logo():
     """Display text-based logo as fallback"""
@@ -501,14 +501,14 @@ def main():
         with col3:
             st.metric("Upload Time", datetime.now().strftime("%H:%M:%S"))
         
-        st.markdown('<div class="success-box">✅ File uploaded to backup successfully!</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-box">[SUCCESS] File uploaded to backup successfully!</div>', unsafe_allow_html=True)
         
         # Step 2 removed: image preview is disabled
         
         # Step 3: Processing
         st.markdown('<h2 class="step-header">Step 3: Process File</h2>', unsafe_allow_html=True)
         
-        if st.button("🚀 Start Processing", type="primary", disabled=st.session_state.processing_status == "Processing"):
+        if st.button("Start Processing", type="primary", disabled=st.session_state.processing_status == "Processing"):
             st.session_state.processing_status = "Processing"
             
             # Create progress containers
@@ -525,12 +525,12 @@ def main():
                 
                 if not text_file_path:
                     st.session_state.processing_status = "Error"
-                    st.markdown('<div class="error-box">❌ PDF conversion failed</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="error-box">[ERROR] PDF conversion failed</div>', unsafe_allow_html=True)
                     st.error(f"Error: {error}")
                     return
                 
                 with log_container.expander("PDF Conversion Log", expanded=False):
-                    st.text(f"✅ Text file created: {text_file_path}")
+                    st.text(f"[SUCCESS] Text file created: {text_file_path}")
                 
                 # Step 2: Process text file
                 status_text.text("Step 2/3: Processing text with LLM...")
@@ -544,7 +544,7 @@ def main():
                 
                 if not result_file_path:
                     st.session_state.processing_status = "Error"
-                    st.markdown('<div class="error-box">❌ Text processing failed</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="error-box">[ERROR] Text processing failed</div>', unsafe_allow_html=True)
                     st.error(f"Error: {error}")
                     return
                 
@@ -587,7 +587,7 @@ def main():
             with col2:
                 max_pages = st.number_input("Max Pages", value=50, min_value=5, max_value=200)
             
-            if st.button("🧠 Analyze PDF Structure", disabled=st.session_state.processing_status == "Processing"):
+            if st.button("Analyze PDF Structure", disabled=st.session_state.processing_status == "Processing"):
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Analyzing PDF structure..."):
@@ -595,7 +595,15 @@ def main():
                         cmd_analyze = [
                             PYTHON_CMD, "src/claim_extractor/table_type_detector.py", str(backup_path)
                         ]
-                        result = subprocess.run(cmd_analyze, capture_output=True, text=True, timeout=ANALYSIS_TIMEOUT)
+                        # Ensure Windows resolves the interpreter and paths correctly
+                        result = subprocess.run(
+                            cmd_analyze,
+                            capture_output=True,
+                            text=True,
+                            timeout=ANALYSIS_TIMEOUT,
+                            cwd=str(Path.cwd()),
+                            shell=False
+                        )
                         
                         if result.returncode == 0:
                             st.success("PDF Analysis Complete")
@@ -609,7 +617,7 @@ def main():
                     st.session_state.processing_status = "Error"
                     st.error(f"PDF analysis failed: {e}")
             
-            if st.button("🚀 Run Adaptive Extraction", disabled=st.session_state.processing_status == "Processing"):
+            if st.button("Run Adaptive Extraction", disabled=st.session_state.processing_status == "Processing"):
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Running adaptive table extraction..."):
@@ -621,7 +629,14 @@ def main():
                         if force_strategy != "auto":
                             cmd_extract.extend(["--strategy", force_strategy])
                         
-                        result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=EXTRACTION_TIMEOUT)
+                        result = subprocess.run(
+                            cmd_extract,
+                            capture_output=True,
+                            text=True,
+                            timeout=EXTRACTION_TIMEOUT,
+                            cwd=str(Path.cwd()),
+                            shell=False
+                        )
                         
                         # Debug information
                         if SHOW_DEBUG_INFO:
@@ -643,14 +658,14 @@ def main():
                             if json_files or excel_files:
                                 st.markdown("**Extracted Files:**")
                                 for file in json_files + excel_files:
-                                    st.write(f"📄 {file.name}")
+                                    st.write(f"[FILE] {file.name}")
                                 
                                 # Show Excel preview if available
                                 if excel_files:
                                     try:
                                         excel_data = pd.read_excel(excel_files[0], sheet_name=None)
                                         for sheet_name, df in excel_data.items():
-                                            with st.expander(f"📊 {sheet_name}"):
+                                            with st.expander(f"[SHEET] {sheet_name}"):
                                                 st.dataframe(df, use_container_width=True)
                                     except Exception as e:
                                         st.warning(f"Could not preview Excel: {e}")
@@ -704,7 +719,7 @@ def main():
             with col_c:
                 cfg_path = st.text_input("Config path", value="config.py")
 
-            if st.button("🧠 Run Scripts", disabled=st.session_state.processing_status == "Processing"):
+            if st.button("Run Scripts", disabled=st.session_state.processing_status == "Processing"):
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Step 1/2: Claude OCR to tmp ..."):
@@ -732,7 +747,14 @@ def main():
                         # Show command being run
                         st.text(f"Command: {' '.join(cmd1)}")
                         
-                        res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=OCR_TIMEOUT)
+                        res1 = subprocess.run(
+                            cmd1,
+                            capture_output=True,
+                            text=True,
+                            timeout=OCR_TIMEOUT,
+                            cwd=str(Path.cwd()),
+                            shell=False
+                        )
                         if res1.returncode != 0:
                             st.session_state.processing_status = "Error"
                             st.error("Claude OCR script failed")
@@ -763,7 +785,14 @@ def main():
                             PYTHON_CMD, "text_lob_llm_extractor.py",
                             str(txt_file), "--config", cfg_path, "--out", str(out_dir)
                         ]
-                        res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=LOB_TIMEOUT)
+                        res2 = subprocess.run(
+                            cmd2,
+                            capture_output=True,
+                            text=True,
+                            timeout=LOB_TIMEOUT,
+                            cwd=str(Path.cwd()),
+                            shell=False
+                        )
                         if res2.returncode != 0:
                             st.session_state.processing_status = "Error"
                             st.error("LOB extractor script failed")
@@ -805,7 +834,7 @@ def main():
             result_file = Path(st.session_state.result_file)
             
             if result_file.exists():
-                st.markdown('<div class="info-box">📊 Processing Results:</div>', unsafe_allow_html=True)
+                st.markdown('<div class="info-box">[RESULTS] Processing Results:</div>', unsafe_allow_html=True)
                 
                 # Show file info
                 col1, col2, col3 = st.columns(3)

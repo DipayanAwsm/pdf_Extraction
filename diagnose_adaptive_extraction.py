@@ -143,7 +143,7 @@ def test_standalone_extractor():
 
 def main():
     """Run all diagnostic checks."""
-    print("🔍 Adaptive Table Extraction Diagnostic Tool")
+    print("Adaptive Table Extraction Diagnostic Tool")
     print("=" * 50)
     
     checks = [
@@ -163,7 +163,7 @@ def main():
             results.append((name, False))
     
     print("\n" + "=" * 50)
-    print("📊 DIAGNOSTIC SUMMARY")
+    print("DIAGNOSTIC SUMMARY")
     print("=" * 50)
     
     all_passed = True
@@ -175,10 +175,10 @@ def main():
     
     print("\n" + "=" * 50)
     if all_passed:
-        print("🎉 All checks passed! Adaptive extraction should work.")
+        print("[COMPLETE] All checks passed! Adaptive extraction should work.")
     else:
-        print("⚠️  Some checks failed. Fix the issues above and try again.")
-        print("\n💡 Quick fixes:")
+        print("[WARNING] Some checks failed. Fix the issues above and try again.")
+        print("\nQuick fixes:")
         print("1. Install dependencies: pip install -r requirements.txt")
         print("2. Check config.py has valid AWS credentials")
         print("3. Ensure sample PDFs exist in samples/ directory")

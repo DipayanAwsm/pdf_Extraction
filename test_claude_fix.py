@@ -8,14 +8,14 @@ from pathlib import Path
 
 def test_claude_api_fix():
     """Test that the Claude API fix resolves the system role error."""
-    print("🔍 Testing Claude API Fix")
+    print(" Testing Claude API Fix")
     print("=" * 40)
     
     try:
         # Test 1: Check if the fixed function can be imported
         print("1. Testing import...")
         from src.claim_extractor.claude_pdf_image_extractor import call_claude_on_image
-        print("   ✅ Import successful")
+        print("   [SUCCESS] Import successful")
         
         # Test 2: Check if config is valid
         print("\n2. Testing configuration...")
@@ -29,11 +29,11 @@ def test_claude_api_fix():
             # Check if values are not placeholders
             if (not config.AWS_ACCESS_KEY.startswith('YOUR_') and 
                 not config.AWS_SECRET_KEY.startswith('YOUR_')):
-                print("   ✅ Configuration looks valid")
+                print("   [SUCCESS] Configuration looks valid")
             else:
                 print("   ⚠️  Configuration has placeholder values - update with real credentials")
         else:
-            print("   ❌ Configuration missing required fields")
+            print("   [ERROR] Configuration missing required fields")
             return False
         
         # Test 3: Test Bedrock connection
@@ -61,13 +61,13 @@ def test_claude_api_fix():
         )
         
         content = json.loads(test_response["body"].read())["content"][0]["text"]
-        print(f"   ✅ Bedrock connection successful: {content[:50]}...")
+        print(f"   [SUCCESS] Bedrock connection successful: {content[:50]}...")
         
-        print("\n🎉 All tests passed! The system role error should be fixed.")
+        print("\n[COMPLETE] All tests passed! The system role error should be fixed.")
         return True
         
     except Exception as e:
-        print(f"\n❌ Test failed: {e}")
+        print(f"\n[ERROR] Test failed: {e}")
         return False
 
 def main():
@@ -75,11 +75,11 @@ def main():
     success = test_claude_api_fix()
     
     if success:
-        print("\n✅ Claude API fix is working correctly!")
+        print("\n[SUCCESS] Claude API fix is working correctly!")
         print("\nYou can now try running the adaptive extractor:")
         print("python adaptive_table_extractor_standalone.py your_file.pdf --out results")
     else:
-        print("\n❌ There are still issues to resolve.")
+        print("\n[ERROR] There are still issues to resolve.")
         print("Run: python debug_claude_error.py")
 
 if __name__ == "__main__":

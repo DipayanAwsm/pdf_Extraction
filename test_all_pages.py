@@ -9,16 +9,16 @@ from pathlib import Path
 
 def test_all_pages_processing():
     """Test that all pages are processed when no page range is specified."""
-    print("🔍 Testing All Pages Processing")
+    print(" Testing All Pages Processing")
     print("=" * 40)
     
     # Check if we have a sample PDF
     sample_pdf = "samples/sample_claim_variation_1.pdf"
     if not Path(sample_pdf).exists():
-        print(f"❌ Sample PDF not found: {sample_pdf}")
+        print(f"[ERROR] Sample PDF not found: {sample_pdf}")
         return False
     
-    print(f"📄 Testing with: {sample_pdf}")
+    print(f"[FILE] Testing with: {sample_pdf}")
     
     # Test 1: Process all pages (no page range)
     print("\n1. Testing ALL pages processing (no page range)...")
@@ -50,24 +50,24 @@ def test_all_pages_processing():
                     content = txt_file.read_text(encoding='utf-8')
                     # Count page markers
                     page_markers = content.count("=== PAGE")
-                    print(f"✅ Found {page_markers} page markers in output")
-                    print(f"✅ Output file: {txt_file}")
+                    print(f"[SUCCESS] Found {page_markers} page markers in output")
+                    print(f"[SUCCESS] Output file: {txt_file}")
                     return True
                 else:
-                    print("❌ No text file found in output directory")
+                    print("[ERROR] No text file found in output directory")
                     return False
             else:
-                print("❌ Output directory not created")
+                print("[ERROR] Output directory not created")
                 return False
         else:
-            print("❌ Command failed")
+            print("[ERROR] Command failed")
             return False
             
     except subprocess.TimeoutExpired:
-        print("❌ Command timed out")
+        print("[ERROR] Command timed out")
         return False
     except Exception as e:
-        print(f"❌ Exception: {e}")
+        print(f"[ERROR] Exception: {e}")
         return False
 
 def test_specific_page_range():
@@ -92,19 +92,19 @@ def test_specific_page_range():
             print(result.stdout)
         
         if result.returncode == 0:
-            print("✅ Page range processing successful")
+            print("[SUCCESS] Page range processing successful")
             return True
         else:
-            print("❌ Page range processing failed")
+            print("[ERROR] Page range processing failed")
             return False
             
     except Exception as e:
-        print(f"❌ Exception: {e}")
+        print(f"[ERROR] Exception: {e}")
         return False
 
 def main():
     """Run all tests."""
-    print("🧪 Testing Legacy OCR Page Processing")
+    print("[TEST] Testing Legacy OCR Page Processing")
     print("=" * 50)
     
     # Test 1: All pages
@@ -117,13 +117,13 @@ def main():
     print("📊 TEST SUMMARY")
     print("=" * 50)
     
-    print(f"All pages processing: {'✅ PASS' if test1_success else '❌ FAIL'}")
-    print(f"Page range processing: {'✅ PASS' if test2_success else '❌ FAIL'}")
+    print(f"All pages processing: {'[SUCCESS] PASS' if test1_success else '[ERROR] FAIL'}")
+    print(f"Page range processing: {'[SUCCESS] PASS' if test2_success else '[ERROR] FAIL'}")
     
     if test1_success and test2_success:
-        print("\n🎉 All tests passed! Page processing is working correctly.")
+        print("\n[COMPLETE] All tests passed! Page processing is working correctly.")
     else:
-        print("\n⚠️  Some tests failed. Check the output above for details.")
+        print("\n[WARNING]  Some tests failed. Check the output above for details.")
 
 if __name__ == "__main__":
     main()

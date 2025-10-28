@@ -541,7 +541,7 @@ def write_outputs(per_lob: Dict[str, pd.DataFrame], out_dir: Path):
         except Exception as e:
             print(f"WARNING: Failed writing combined result.xlsx: {e}")
     else:
-        print("ℹ️ No data found for any LoB. Skipping result.xlsx creation.")
+        print("[INFO] No data found for any LoB. Skipping result.xlsx creation.")
 
 
 def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_chars: int, overlap_chars: int, per_chunk_sleep: float, use_token_chunking: bool, max_tokens: int, overlap_tokens: int) -> List[Dict]:

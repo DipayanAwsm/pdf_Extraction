@@ -27,19 +27,19 @@ def check_config():
                     missing_attrs.append(f"{attr} (placeholder value)")
         
         if missing_attrs:
-            print("❌ Configuration issues found:")
+            print("[ERROR] Configuration issues found:")
             for attr in missing_attrs:
                 print(f"   - {attr}")
             return False
         else:
-            print("✅ Configuration looks valid")
+            print("[SUCCESS] Configuration looks valid")
             return True
             
     except ImportError:
-        print("❌ config.py not found")
+        print("[ERROR] config.py not found")
         return False
     except Exception as e:
-        print(f"❌ Error reading config: {e}")
+        print(f"[ERROR] Error reading config: {e}")
         return False
 
 def test_bedrock_connection():
@@ -74,13 +74,13 @@ def test_bedrock_connection():
         
         # Check response
         content = json.loads(response["body"].read())["content"][0]["text"]
-        print(f"✅ Test response: {content[:100]}...")
+        print(f"[SUCCESS] Test response: {content[:100]}...")
         
-        print("✅ Bedrock connection successful")
+        print("[SUCCESS] Bedrock connection successful")
         return True
         
     except Exception as e:
-        print(f"❌ Bedrock connection failed: {e}")
+        print(f"[ERROR] Bedrock connection failed: {e}")
         return False
 
 def test_image_processing():
@@ -94,14 +94,14 @@ def test_image_processing():
         extractor = AdaptiveTableExtractor()
         
         if not extractor.bedrock:
-            print("❌ Bedrock client not initialized")
+            print("[ERROR] Bedrock client not initialized")
             return False
         
-        print("✅ Bedrock client initialized")
+        print("[SUCCESS] Bedrock client initialized")
         return True
         
     except Exception as e:
-        print(f"❌ Image processing test failed: {e}")
+        print(f"[ERROR] Image processing test failed: {e}")
         return False
 
 def suggest_fixes():
@@ -132,7 +132,7 @@ def suggest_fixes():
 
 def main():
     """Run all diagnostic checks."""
-    print("🔍 Claude API Validation Error Diagnostic")
+    print(" Claude API Validation Error Diagnostic")
     print("=" * 50)
     
     checks = [
@@ -147,16 +147,16 @@ def main():
             result = check_func()
             results.append((name, result))
         except Exception as e:
-            print(f"❌ {name} check failed with exception: {e}")
+            print(f"[ERROR] {name} check failed with exception: {e}")
             results.append((name, False))
     
     print("\n" + "=" * 50)
-    print("📊 DIAGNOSTIC SUMMARY")
+    print(" DIAGNOSTIC SUMMARY")
     print("=" * 50)
     
     all_passed = True
     for name, passed in results:
-        status = "✅ PASS" if passed else "❌ FAIL"
+        status = "[SUCCESS] PASS" if passed else "[ERROR] FAIL"
         print(f"{name:20} {status}")
         if not passed:
             all_passed = False
@@ -166,9 +166,9 @@ def main():
     
     print("\n" + "=" * 50)
     if all_passed:
-        print("🎉 All checks passed! The issue might be with the specific PDF or request size.")
+        print("[COMPLETE] All checks passed! The issue might be with the specific PDF or request size.")
     else:
-        print("⚠️  Fix the configuration issues above and try again.")
+        print("[WARNING]  Fix the configuration issues above and try again.")
 
 if __name__ == "__main__":
     main()
