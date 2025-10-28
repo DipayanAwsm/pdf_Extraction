@@ -562,14 +562,13 @@ def process_text_file(text_file_path: str, bedrock_client, model_id: str, max_ch
                 max_chars=max_chars, overlap_chars=overlap_chars, per_chunk_sleep=per_chunk_sleep,
                 use_token_chunking=use_token_chunking, max_tokens=max_tokens, overlap_tokens=overlap_tokens
             , fast=True)
-            # Extract carrier from filename first, then fallback to text extraction
+            # Extract carrier from filename first, then fallback to LLM extraction (no text fallback)
             filename_carrier = _extract_carrier_from_filename(text_file_path)
-            text_carrier = _extract_carrier_from_text(text_content)
             llm_carrier = fields.get('carrier', '')
             
-            # Priority: filename > LLM extraction > text extraction
-            carrier = filename_carrier or llm_carrier or text_carrier
-            print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}' (from filename: '{filename_carrier}')")
+            # Priority: filename > LLM extraction
+            carrier = filename_carrier or llm_carrier
+            print(f"File '{text_file_path}': LoB={lob}, Carrier='{carrier}' (from filename: '{filename_carrier}', llm: '{llm_carrier}')")
             results.append({
                 'lob': lob,
                 'carrier': carrier,
