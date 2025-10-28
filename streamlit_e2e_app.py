@@ -591,9 +591,10 @@ def main():
                 try:
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Analyzing PDF structure..."):
-                        # Run table type detector (using standalone version)
+                        # Run table type detector (build path in a cross-platform way)
+                        analyze_script = str(Path("src") / "claim_extractor" / "table_type_detector.py")
                         cmd_analyze = [
-                            PYTHON_CMD, "src/claim_extractor/table_type_detector.py", str(backup_path)
+                            PYTHON_CMD, analyze_script, str(backup_path)
                         ]
                         # Ensure Windows resolves the interpreter and paths correctly
                         result = subprocess.run(
@@ -622,8 +623,9 @@ def main():
                     st.session_state.processing_status = "Processing"
                     with st.spinner("Running adaptive table extraction..."):
                         # Run adaptive extractor (using standalone version to avoid import issues)
+                        extract_script = str(Path("adaptive_table_extractor_standalone.py"))
                         cmd_extract = [
-                            PYTHON_CMD, "adaptive_table_extractor_standalone.py",
+                            PYTHON_CMD, extract_script,
                             str(backup_path), "--out", "adaptive_results", "--config", CONFIG_FILE
                         ]
                         if force_strategy != "auto":
