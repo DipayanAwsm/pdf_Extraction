@@ -10,6 +10,8 @@ from datetime import datetime
 import altair as alt
 import io
 import importlib.util
+from pdf2image import convert_from_path
+from PIL import Image
 
 # Load configuration
 try:
@@ -155,9 +157,11 @@ if 'processing_status' not in st.session_state:
 if 'processing_times' not in st.session_state:
     st.session_state.processing_times = {}
 if 'debug_mode' not in st.session_state:
-    st.session_state.debug_mode = True  # Default to ON
+    st.session_state.debug_mode = False  # Default to OFF
 if 'debug_logs' not in st.session_state:
     st.session_state.debug_logs = []
+if 'pdf_pages' not in st.session_state:
+    st.session_state.pdf_pages = []
 
 def create_directories():
     """Create necessary directories"""
@@ -246,7 +250,11 @@ def convert_pdf_to_text(pdf_path, tmp_dir, debug_log_container=None):
 def process_text_with_openai(text_file_path, results_dir, original_pdf_name, debug_log_container=None):
     """Process text file using text_lob_openai_extractor.py"""
     try:
-        output_dir = results_dir / original_pdf_name.replace('.pdf', '')
+        # Create timestamped output directory with original filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        original_name_no_ext = Path(original_pdf_name).stem
+        output_dir_name = f"{original_name_no_ext}_{timestamp}"
+        output_dir = results_dir / output_dir_name
         output_dir.mkdir(exist_ok=True)
         
         cmd = [
@@ -297,7 +305,15 @@ def process_text_with_openai(text_file_path, results_dir, original_pdf_name, deb
         if result_code == 0:
             excel_files = list(output_dir.glob("result.xlsx"))
             if excel_files:
-                return str(excel_files[0]), None
+                # Rename result.xlsx to include original filename and timestamp
+                original_result = excel_files[0]
+                new_filename = f"{original_name_no_ext}_{timestamp}_result.xlsx"
+                final_result_path = output_dir / new_filename
+                
+                # Copy the file with new name
+                shutil.copy2(original_result, final_result_path)
+                
+                return str(final_result_path), None
             return None, "Extraction completed but result.xlsx not found"
         
         return None, stderr_text or "Extraction failed"
@@ -383,7 +399,61 @@ def main():
         
         st.markdown('<div class="success-box">[SUCCESS] File uploaded to backup successfully!</div>', unsafe_allow_html=True)
         
-        # Step 2: Processing
+        # Step 2: PDF Preview
+        st.markdown('<h2 class="step-header">Step 2: PDF Preview</h2>', unsafe_allow_html=True)
+        
+        @st.cache_data(show_spinner=False)
+        def _render_pdf_pages_cached(path_str: str, max_pages: int = 6, dpi: int = 120):
+            try:
+                pages = convert_from_path(path_str, dpi=dpi, first_page=1, last_page=max_pages)
+                return pages
+            except Exception as e:
+                st.error(f"Preview generation error: {str(e)}")
+                st.info("💡 Make sure poppler is installed: `brew install poppler` (macOS) or `apt-get install poppler-utils` (Linux)")
+                return []
+        
+        try:
+            import fitz
+            doc = fitz.open(backup_path)
+            total_pages = len(doc)
+            doc.close()
+            
+            col_preview, col_large = st.columns([3, 2])
+            with col_preview:
+                st.caption("📑 Preview thumbnails (first pages)")
+                max_preview_pages = min(6, total_pages)
+                thumbs = _render_pdf_pages_cached(str(backup_path), max_pages=max_preview_pages, dpi=110)
+                if thumbs:
+                    rows = [thumbs[i:i+2] for i in range(0, len(thumbs), 2)]
+                    for row_imgs in rows:
+                        c1, c2 = st.columns(2)
+                        for idx, img in enumerate(row_imgs):
+                            with (c1 if idx == 0 else c2):
+                                st.image(img, use_container_width=True)
+                else:
+                    st.info("No preview available. Ensure Poppler is installed.")
+            
+            with col_large:
+                st.caption("🔍 Large preview")
+                page_num = st.number_input("Page to preview", min_value=1, max_value=min(6, total_pages), value=1, step=1)
+                large = _render_pdf_pages_cached(str(backup_path), max_pages=page_num, dpi=160)
+                if large:
+                    st.image(large[-1], use_container_width=True, caption=f"Page {page_num} of {total_pages}")
+                else:
+                    st.info("Preview not available for this file.")
+            
+            with st.expander("File Details", expanded=False):
+                st.write(f"**File Path:** {backup_path}")
+                st.write(f"**Total Pages:** {total_pages}")
+                st.write(f"**File Size:** {uploaded_file.size / 1024:.1f} KB")
+                st.write(f"**MIME Type:** {uploaded_file.type}")
+        
+        except ImportError:
+            st.warning("⚠️ PyMuPDF (fitz) not available for page count. Install with: `pip install PyMuPDF`")
+        except Exception as e:
+            st.warning(f"⚠️ Could not load PDF for preview: {str(e)}")
+        
+        # Step 3: Processing
         st.markdown('<h2 class="step-header">Step 2: Process File with OpenAI</h2>', unsafe_allow_html=True)
         
         # Debug mode toggle
@@ -475,7 +545,7 @@ def main():
                 st.markdown('<div class="error-box">❌ Processing failed with exception</div>', unsafe_allow_html=True)
                 st.error(f"Exception: {str(e)}")
         
-        # Step 3: Results & Summary
+        # Step 4: Results & Summary
         if st.session_state.processing_complete and st.session_state.result_file:
             st.markdown('<h2 class="step-header">Step 3: Results & Summary</h2>', unsafe_allow_html=True)
             
@@ -718,8 +788,11 @@ def main():
                 st.text(log)
     
     if st.sidebar.button("🔄 Reset Session"):
+        # Reset all session state except debug_mode preference
+        debug_pref = st.session_state.get('debug_mode', False)
         for key in list(st.session_state.keys()):
             del st.session_state[key]
+        st.session_state.debug_mode = debug_pref
         st.rerun()
     
     st.sidebar.markdown("---")
