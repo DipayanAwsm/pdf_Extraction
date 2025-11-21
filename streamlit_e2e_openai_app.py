@@ -154,6 +154,10 @@ if 'processing_status' not in st.session_state:
     st.session_state.processing_status = "Ready"
 if 'processing_times' not in st.session_state:
     st.session_state.processing_times = {}
+if 'debug_mode' not in st.session_state:
+    st.session_state.debug_mode = True  # Default to ON
+if 'debug_logs' not in st.session_state:
+    st.session_state.debug_logs = []
 
 def create_directories():
     """Create necessary directories"""
@@ -178,20 +182,51 @@ def save_to_backup(uploaded_file, backup_dir):
     
     return file_path
 
-def convert_pdf_to_text(pdf_path, tmp_dir):
+def convert_pdf_to_text(pdf_path, tmp_dir, debug_log_container=None):
     """Convert PDF to text using fitzTest3.py"""
     try:
         cmd = [PYTHON_CMD, "fitzTest3.py", str(pdf_path), "--output", str(tmp_dir)]
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=OCR_TIMEOUT
-        )
+        if st.session_state.debug_mode and debug_log_container:
+            # Real-time output capture
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            output_lines = []
+            log_buffer = []
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    output_lines.append(line)
+                    log_line = f"[PDF->Text] {line}"
+                    log_buffer.append(log_line)
+                    st.session_state.debug_logs.append(log_line)
+            
+            # Update debug log container with all lines
+            if debug_log_container and log_buffer:
+                debug_log_container.code('\n'.join(log_buffer), language='text')
+            
+            process.wait()
+            result_code = process.returncode
+            stdout_text = '\n'.join(output_lines)
+        else:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=OCR_TIMEOUT
+            )
+            result_code = result.returncode
+            stdout_text = result.stdout
         
-        if result.returncode == 0:
-            output_lines = result.stdout.strip().split('\n')
+        if result_code == 0:
+            output_lines = stdout_text.strip().split('\n')
             for line in output_lines:
                 if line.startswith("SUCCESS:"):
                     return line.replace("SUCCESS:", "").strip(), None
@@ -201,14 +236,14 @@ def convert_pdf_to_text(pdf_path, tmp_dir):
                 return str(txts[0]), None
             return None, "Text file not found after conversion"
         
-        return None, result.stderr
+        return None, stdout_text or "Conversion failed"
         
     except subprocess.TimeoutExpired:
         return None, "PDF conversion timed out"
     except Exception as e:
         return None, str(e)
 
-def process_text_with_openai(text_file_path, results_dir, original_pdf_name):
+def process_text_with_openai(text_file_path, results_dir, original_pdf_name, debug_log_container=None):
     """Process text file using text_lob_openai_extractor.py"""
     try:
         output_dir = results_dir / original_pdf_name.replace('.pdf', '')
@@ -221,20 +256,51 @@ def process_text_with_openai(text_file_path, results_dir, original_pdf_name):
             "--out", str(output_dir)
         ]
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=LOB_TIMEOUT
-        )
+        if st.session_state.debug_mode and debug_log_container:
+            # Real-time output capture
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            output_lines = []
+            log_buffer = []
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    output_lines.append(line)
+                    log_line = f"[OpenAI] {line}"
+                    log_buffer.append(log_line)
+                    st.session_state.debug_logs.append(log_line)
+            
+            # Update debug log container with all lines
+            if debug_log_container and log_buffer:
+                debug_log_container.code('\n'.join(log_buffer), language='text')
+            
+            process.wait()
+            result_code = process.returncode
+            stderr_text = '\n'.join(output_lines)
+        else:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=LOB_TIMEOUT
+            )
+            result_code = result.returncode
+            stderr_text = result.stderr
         
-        if result.returncode == 0:
+        if result_code == 0:
             excel_files = list(output_dir.glob("result.xlsx"))
             if excel_files:
                 return str(excel_files[0]), None
             return None, "Extraction completed but result.xlsx not found"
         
-        return None, result.stderr or "Extraction failed"
+        return None, stderr_text or "Extraction failed"
         
     except subprocess.TimeoutExpired:
         return None, "OpenAI extraction timed out"
@@ -320,6 +386,10 @@ def main():
         # Step 2: Processing
         st.markdown('<h2 class="step-header">Step 2: Process File with OpenAI</h2>', unsafe_allow_html=True)
         
+        # Debug mode toggle
+        debug_mode = st.checkbox("🐛 Debug Mode (Show Real-time Logs)", value=st.session_state.debug_mode)
+        st.session_state.debug_mode = debug_mode
+        
         if st.button("🚀 Start Processing", type="primary", disabled=st.session_state.processing_status == "Processing"):
             st.session_state.processing_status = "Processing"
             st.session_state.processing_times = {}
@@ -327,6 +397,11 @@ def main():
             progress_bar = st.progress(0)
             status_text = st.empty()
             log_container = st.empty()
+            debug_log_container = st.empty() if st.session_state.debug_mode else None
+            
+            # Clear debug logs at start
+            if st.session_state.debug_mode:
+                st.session_state.debug_logs = []
             
             try:
                 start_total = time.time()
@@ -335,8 +410,14 @@ def main():
                 status_text.text("Step 1/3: Converting PDF to text...")
                 progress_bar.progress(0.2)
                 
+                if st.session_state.debug_mode:
+                    st.markdown("**📋 Real-time Debug Logs (PDF to Text):**")
+                    debug_placeholder = st.empty()
+                else:
+                    debug_placeholder = None
+                
                 start_ocr = time.time()
-                text_file_path, error = convert_pdf_to_text(backup_path, tmp_dir)
+                text_file_path, error = convert_pdf_to_text(backup_path, tmp_dir, debug_placeholder)
                 ocr_time = time.time() - start_ocr
                 st.session_state.processing_times['PDF to Text'] = ocr_time
                 
@@ -354,11 +435,18 @@ def main():
                 status_text.text("Step 2/3: Processing text with OpenAI...")
                 progress_bar.progress(0.6)
                 
+                if st.session_state.debug_mode:
+                    st.markdown("**📋 Real-time Debug Logs (OpenAI Extraction):**")
+                    debug_placeholder_openai = st.empty()
+                else:
+                    debug_placeholder_openai = None
+                
                 start_openai = time.time()
                 result_file_path, error = process_text_with_openai(
                     text_file_path,
                     results_dir,
-                    uploaded_file.name
+                    uploaded_file.name,
+                    debug_placeholder_openai
                 )
                 openai_time = time.time() - start_openai
                 st.session_state.processing_times['OpenAI Extraction'] = openai_time
@@ -615,12 +703,19 @@ def main():
     st.sidebar.title("Processing Status")
     st.sidebar.markdown("---")
     st.sidebar.write(f"**Status:** {st.session_state.processing_status}")
+    st.sidebar.write(f"**Debug Mode:** {'✅ ON' if st.session_state.debug_mode else '❌ OFF'}")
     
     if st.session_state.uploaded_file:
         st.sidebar.write(f"**File:** {Path(st.session_state.uploaded_file).name}")
     
     if st.session_state.result_file:
         st.sidebar.write(f"**Result:** {Path(st.session_state.result_file).name}")
+    
+    # Debug logs in sidebar
+    if st.session_state.debug_mode and st.session_state.debug_logs:
+        with st.sidebar.expander("🐛 Debug Logs", expanded=False):
+            for log in st.session_state.debug_logs[-50:]:  # Show last 50 lines
+                st.text(log)
     
     if st.sidebar.button("🔄 Reset Session"):
         for key in list(st.session_state.keys()):
