@@ -10,7 +10,10 @@ from datetime import datetime
 import altair as alt
 import io
 import importlib.util
-from pdf2image import convert_from_path
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 from PIL import Image
 
 # Load configuration
@@ -402,56 +405,82 @@ def main():
         # Step 2: PDF Preview
         st.markdown('<h2 class="step-header">Step 2: PDF Preview</h2>', unsafe_allow_html=True)
         
-        @st.cache_data(show_spinner=False)
-        def _render_pdf_pages_cached(path_str: str, max_pages: int = 6, dpi: int = 120):
+        if fitz is None:
+            st.warning("⚠️ PyMuPDF (fitz) is not installed. Install with: `pip install PyMuPDF`")
+        else:
             try:
-                pages = convert_from_path(path_str, dpi=dpi, first_page=1, last_page=max_pages)
-                return pages
-            except Exception as e:
-                st.error(f"Preview generation error: {str(e)}")
-                st.info("💡 Make sure poppler is installed: `brew install poppler` (macOS) or `apt-get install poppler-utils` (Linux)")
-                return []
-        
-        try:
-            import fitz
-            doc = fitz.open(backup_path)
-            total_pages = len(doc)
-            doc.close()
-            
-            col_preview, col_large = st.columns([3, 2])
-            with col_preview:
-                st.caption("📑 Preview thumbnails (first pages)")
-                max_preview_pages = min(6, total_pages)
-                thumbs = _render_pdf_pages_cached(str(backup_path), max_pages=max_preview_pages, dpi=110)
-                if thumbs:
-                    rows = [thumbs[i:i+2] for i in range(0, len(thumbs), 2)]
-                    for row_imgs in rows:
+                doc = fitz.open(backup_path)
+                total_pages = len(doc)
+                
+                @st.cache_data(show_spinner=False)
+                def _render_page_with_fitz(pdf_path: str, page_num: int, zoom: float = 1.5):
+                    """Render a single PDF page using PyMuPDF"""
+                    try:
+                        doc = fitz.open(pdf_path)
+                        if page_num < 1 or page_num > len(doc):
+                            return None
+                        page = doc[page_num - 1]  # 0-indexed
+                        mat = fitz.Matrix(zoom, zoom)  # Zoom factor for quality
+                        pix = page.get_pixmap(matrix=mat)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        doc.close()
+                        return img
+                    except Exception as e:
+                        return None
+                
+                col_preview, col_large = st.columns([3, 2])
+                
+                with col_preview:
+                    st.caption("📑 Preview thumbnails (first pages)")
+                    max_preview_pages = min(6, total_pages)
+                    
+                    # Render thumbnails in 2-column grid
+                    rows = []
+                    for i in range(0, max_preview_pages, 2):
+                        rows.append((i+1, min(i+2, max_preview_pages)))
+                    
+                    for start_page, end_page in rows:
                         c1, c2 = st.columns(2)
-                        for idx, img in enumerate(row_imgs):
+                        for idx, page_num in enumerate(range(start_page, end_page + 1)):
                             with (c1 if idx == 0 else c2):
-                                st.image(img, use_container_width=True)
-                else:
-                    st.info("No preview available. Ensure Poppler is installed.")
-            
-            with col_large:
-                st.caption("🔍 Large preview")
-                page_num = st.number_input("Page to preview", min_value=1, max_value=min(6, total_pages), value=1, step=1)
-                large = _render_pdf_pages_cached(str(backup_path), max_pages=page_num, dpi=160)
-                if large:
-                    st.image(large[-1], use_container_width=True, caption=f"Page {page_num} of {total_pages}")
-                else:
-                    st.info("Preview not available for this file.")
-            
-            with st.expander("File Details", expanded=False):
-                st.write(f"**File Path:** {backup_path}")
-                st.write(f"**Total Pages:** {total_pages}")
-                st.write(f"**File Size:** {uploaded_file.size / 1024:.1f} KB")
-                st.write(f"**MIME Type:** {uploaded_file.type}")
-        
-        except ImportError:
-            st.warning("⚠️ PyMuPDF (fitz) not available for page count. Install with: `pip install PyMuPDF`")
-        except Exception as e:
-            st.warning(f"⚠️ Could not load PDF for preview: {str(e)}")
+                                thumb_img = _render_page_with_fitz(str(backup_path), page_num, zoom=1.0)
+                                if thumb_img:
+                                    st.image(thumb_img, use_container_width=True, caption=f"Page {page_num}")
+                                else:
+                                    st.info(f"Could not render page {page_num}")
+                
+                with col_large:
+                    st.caption("🔍 Large preview")
+                    page_num = st.number_input("Page to preview", min_value=1, max_value=total_pages, value=1, step=1)
+                    
+                    large_img = _render_page_with_fitz(str(backup_path), page_num, zoom=2.0)
+                    if large_img:
+                        st.image(large_img, use_container_width=True, caption=f"Page {page_num} of {total_pages}")
+                    else:
+                        st.info("Preview not available for this page.")
+                
+                with st.expander("File Details", expanded=False):
+                    st.write(f"**File Path:** {backup_path}")
+                    st.write(f"**Total Pages:** {total_pages}")
+                    st.write(f"**File Size:** {uploaded_file.size / 1024:.1f} KB")
+                    st.write(f"**MIME Type:** {uploaded_file.type}")
+                    
+                    # Additional PDF metadata
+                    try:
+                        metadata = doc.metadata
+                        if metadata:
+                            st.write("**PDF Metadata:**")
+                            for key, value in metadata.items():
+                                if value:
+                                    st.write(f"  - {key}: {value}")
+                    except:
+                        pass
+                
+                doc.close()
+                
+            except Exception as e:
+                st.error(f"⚠️ Could not load PDF for preview: {str(e)}")
+                st.info("💡 Make sure the PDF file is valid and not corrupted.")
         
         # Step 3: Processing
         st.markdown('<h2 class="step-header">Step 2: Process File with OpenAI</h2>', unsafe_allow_html=True)
