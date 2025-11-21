@@ -5,7 +5,11 @@ import os
 from pathlib import Path
 from typing import Tuple, List
 
-import boto3
+try:
+    import boto3
+except ImportError:
+    print("ERROR: boto3 is not installed. Install it with: pip install boto3")
+    raise
 
 
 def setup_bedrock_client(access_key: str, secret_key: str, session_token: str, region: str):

@@ -11,6 +11,8 @@ import altair as alt
 import io
 import re
 import importlib.util
+from pdf2image import convert_from_path
+from PIL import Image
 
 # Load configuration
 try:
@@ -503,7 +505,42 @@ def main():
         
         st.markdown('<div class="success-box">[SUCCESS] File uploaded to backup successfully!</div>', unsafe_allow_html=True)
         
-        # Step 2 removed: image preview is disabled
+        # Step 2: File Preview (thumbnails + large view)
+        st.markdown('<h2 class="step-header">Step 2: File Preview</h2>', unsafe_allow_html=True)
+        with st.expander("File Details", expanded=False):
+            st.write(f"**File Path:** {backup_path}")
+            st.write(f"**File Size:** {uploaded_file.size / 1024:.1f} KB")
+            st.write(f"**MIME Type:** {uploaded_file.type}")
+        
+        @st.cache_data(show_spinner=False)
+        def _render_pdf_pages_cached(path_str: str, max_pages: int = 6, dpi: int = 120):
+            try:
+                pages = convert_from_path(path_str, dpi=dpi, first_page=1, last_page=max_pages)
+                return pages
+            except Exception:
+                return []
+        
+        col_preview, col_large = st.columns([3, 2])
+        with col_preview:
+            st.caption("Preview thumbnails (first pages)")
+            thumbs = _render_pdf_pages_cached(str(backup_path), max_pages=6, dpi=110)
+            if thumbs:
+                rows = [thumbs[i:i+2] for i in range(0, len(thumbs), 2)]
+                for row_imgs in rows:
+                    c1, c2 = st.columns(2)
+                    for idx, img in enumerate(row_imgs):
+                        with (c1 if idx == 0 else c2):
+                            st.image(img, use_column_width=True)
+            else:
+                st.info("No preview available. Ensure Poppler is installed (macOS: brew install poppler).")
+        with col_large:
+            st.caption("Large preview")
+            page_num = st.number_input("Page to preview", min_value=1, max_value=6, value=1, step=1)
+            large = _render_pdf_pages_cached(str(backup_path), max_pages=page_num, dpi=160)
+            if large:
+                st.image(large[-1], use_column_width=True, caption=f"Page {page_num}")
+            else:
+                st.info("Preview not available for this file.")
         
         # Step 3: Processing
         st.markdown('<h2 class="step-header">Step 3: Process File</h2>', unsafe_allow_html=True)

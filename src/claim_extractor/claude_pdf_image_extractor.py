@@ -6,7 +6,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import boto3
+try:
+    import boto3
+except ImportError:
+    print("ERROR: boto3 is not installed. Install it with: pip install boto3")
+    raise
+
 import pandas as pd
 from pdf2image import convert_from_path
 

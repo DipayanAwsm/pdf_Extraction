@@ -5,7 +5,12 @@ import time
 import uuid
 from typing import Dict, List, Tuple
 
-import boto3
+try:
+    import boto3
+except ImportError:
+    print("ERROR: boto3 is not installed. Install it with: pip install boto3")
+    raise
+
 import pandas as pd
 
 
